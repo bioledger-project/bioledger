@@ -25,12 +25,16 @@ class BioLedgerConfig(BaseSettings):
     @model_validator(mode="after")
     def _apply_default_model(self) -> "BioLedgerConfig":
         """If BIOLEDGER_DEFAULT_MODEL is set, override llm.default_model
-        and all task_models that still use the original default."""
+        and all task_models to use the same provider."""
         if self.default_model:
             old_default = self.llm.default_model
             self.llm.default_model = self.default_model
             for task, model in self.llm.task_models.items():
-                if model == old_default:
+                # Update if exact match on old default OR same provider prefix
+                old_provider = model.split(":")[0] if ":" in model else ""
+                if model == old_default or old_provider == old_default.split(":")[0]:
+                    # Use the new default model for all tasks when switching providers
+                    # This ensures model names are valid for the target provider
                     self.llm.task_models[task] = self.default_model
         return self
 
@@ -38,4 +42,5 @@ class BioLedgerConfig(BaseSettings):
         """Create required directories if they don't exist."""
         self.home_dir.mkdir(parents=True, exist_ok=True)
         (self.home_dir / "tools").mkdir(exist_ok=True)
+        (self.home_dir / "sessions").mkdir(exist_ok=True)
         (self.home_dir / "cache").mkdir(exist_ok=True)

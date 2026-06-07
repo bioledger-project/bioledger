@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from dotenv import load_dotenv
+from rich.prompt import Prompt
 
 load_dotenv()  # Load .env into process environment before anything else
 
@@ -18,8 +19,12 @@ from bioledger.ledger.store import LedgerStore  # noqa: E402
 app = typer.Typer(name="bioledger", help="BioLedger: reproducible bio-analysis")
 session_app = typer.Typer(help="Manage analysis sessions")
 tool_app = typer.Typer(help="Manage tool specifications")
+library_app = typer.Typer(help="Browse and import from the tool library")
+study_app = typer.Typer(help="Browse and load ISA-Tab studies")
 app.add_typer(session_app, name="session")
 app.add_typer(tool_app, name="tool")
+app.add_typer(library_app, name="library")
+app.add_typer(study_app, name="study")
 console = Console()
 
 
@@ -140,14 +145,44 @@ def session_archive(session_id: str) -> None:
 def tool_import(
     path: Path,
     name: str = typer.Option("", help="Override tool name"),
+    use_llm: bool = typer.Option(
+        False, "--use-llm", help="Use LLM to enhance import (requires API key)"
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Render the resulting spec to stdout without saving to the store",
+    ),
 ) -> None:
-    """Import a tool from Galaxy XML, Nextflow module, or BioLedger YAML."""
+    """Import a tool from Galaxy XML, Nextflow module, BioLedger YAML, or a tool directory/suite."""
+    from bioledger.forges.toolforge.translators.galaxy_context import (
+        GalaxySuiteContext,
+        resolve_import_context,
+    )
     from bioledger.toolspec.load import load_spec
     from bioledger.toolspec.models import ToolSpec
-    from bioledger.toolspec.store import ToolStore
-    from bioledger.toolspec.validate import validate_spec
+
+    if path.is_dir():
+        if not use_llm:
+            console.print("[red]Directory import requires --use-llm[/red]")
+            raise typer.Exit(1)
+        context = resolve_import_context(path)
+        if isinstance(context, GalaxySuiteContext):
+            asyncio.run(
+                _tool_import_suite_async(context, name, dry_run=dry_run)
+            )
+        else:
+            asyncio.run(_tool_import_async(path, ".xml", name, dry_run=dry_run))
+        return
 
     suffix = path.suffix.lower()
+
+    if use_llm and suffix in (".xml", ".nf"):
+        # Async LLM-enhanced import
+        asyncio.run(_tool_import_async(path, suffix, name, dry_run=dry_run))
+        return
+
+    # Programmatic import (no LLM)
     if suffix in (".xml",):
         from bioledger.forges.toolforge.translators.galaxy import from_galaxy_xml
 
@@ -170,19 +205,200 @@ def tool_import(
         console.print(f"[red]Unsupported file type: {suffix}[/red]")
         raise typer.Exit(1)
 
+    _finalize_tool_import(spec, dry_run=dry_run)
+
+
+def _finalize_tool_import(spec, *, dry_run: bool) -> None:
+    """Validate, then either render YAML to stdout (dry-run) or save to the store."""
+    from bioledger.apps.cli._ui import print_validation_issues
+    from bioledger.toolspec.load import dump_spec_yaml
+    from bioledger.toolspec.store import ToolStore
+    from bioledger.toolspec.validate import validate_spec
+
     result = validate_spec(spec)
-    store = ToolStore()
-    out = store.save(spec)
-    console.print(f"[green]Imported '{spec.name}' → {out}[/green]")
+
+    if dry_run:
+        console.print(
+            f"[cyan]Dry run — would import '{spec.name}' "
+            "(no files written)[/cyan]"
+        )
+        console.print(dump_spec_yaml(spec))
+    else:
+        store = ToolStore()
+        out = store.save(spec)
+        console.print(f"[green]Imported '{spec.name}' → {out}[/green]")
 
     if result.issues:
-        for issue in result.issues:
-            color = (
-                "red" if issue.severity.value == "error"
-                else "yellow" if issue.severity.value == "warning"
-                else "dim"
-            )
-            console.print(f"  [{color}]{issue.severity.value}[/{color}] {issue.message}")
+        print_validation_issues(result, console)
+
+
+async def _tool_import_async(
+    path: Path, suffix: str, name: str, *, dry_run: bool = False
+) -> None:
+    """Async LLM-enhanced tool import with API key validation."""
+    import os
+
+    # Lazy import config first to check which provider is configured
+    from bioledger.config import BioLedgerConfig
+
+    config = BioLedgerConfig()
+    model = config.llm.default_model  # e.g., "openai:gpt-4o" or "google-gla:gemini-1.5-flash"
+    provider = model.split(":")[0] if ":" in model else "openai"
+
+    # Map provider to required env var
+    provider_env_map = {
+        "openai": "OPENAI_API_KEY",
+        "google-gla": "GOOGLE_API_KEY",
+        "google-vertex": "GOOGLE_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "azure": "AZURE_OPENAI_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "ollama": None,  # Ollama doesn't require an API key
+    }
+
+    required_env = provider_env_map.get(provider, "OPENAI_API_KEY")
+
+    if required_env and not os.getenv(required_env):
+        console.print(
+            f"[red]Error: --use-llm requires {required_env} for provider '{provider}'.[/red]\n\n"
+            f"Your configured model is: {model}\n"
+            f"Required env var: {required_env}\n\n"
+            "To fix this, either:\n\n"
+            f"1. Set the API key: export {required_env}=\"your-key-here\"\n\n"
+            "2. Or switch to a different provider by setting in your .env file:\n"
+            '   BIOLEDGER_DEFAULT_MODEL="google-gla:gemini-1.5-flash"\n'
+            '   BIOLEDGER_DEFAULT_MODEL="anthropic:claude-sonnet-4-20250514"\n\n'
+            "Supported providers and their required env vars:\n"
+            "  - openai: OPENAI_API_KEY\n"
+            "  - google-gla/google-vertex: GOOGLE_API_KEY\n"
+            "  - anthropic: ANTHROPIC_API_KEY\n"
+            "  - azure: AZURE_OPENAI_API_KEY\n\n"
+            "Or use programmatic import without --use-llm."
+        )
+        raise typer.Exit(1)
+
+    # Now import LLM-dependent modules
+    try:
+        from bioledger.core.llm.agents import ForgeDeps
+        from bioledger.forges.toolforge.agent import ToolForgeAgent
+        from bioledger.forges.toolforge.translators.galaxy import import_galaxy_tool
+        from bioledger.forges.toolforge.translators.nextflow import (
+            import_nextflow_module,
+        )
+    except Exception as e:
+        console.print(
+            f"[red]Error: Failed to initialize LLM components: {e}[/red]\n"
+            "Ensure your API key is valid and try again."
+        )
+        raise typer.Exit(1)
+
+    agent = ToolForgeAgent(config)
+
+    # Create minimal session for tool import (not used, but required by ForgeDeps)
+    from bioledger.ledger.models import LedgerSession
+    dummy_session = LedgerSession(name="tool_import_temp")
+    deps = ForgeDeps(session=dummy_session, config=config, context_mode="utility")
+
+    if suffix == ".xml":
+        spec = await import_galaxy_tool(path, deps, agent, use_llm=True)
+    elif suffix == ".nf":
+        spec = await import_nextflow_module(path, deps, agent, use_llm=True)
+    else:
+        console.print(f"[red]Unsupported file type for LLM import: {suffix}[/red]")
+        raise typer.Exit(1)
+
+    if name:
+        spec.execution.name = name
+
+    _finalize_tool_import(spec, dry_run=dry_run)
+
+
+async def _tool_import_suite_async(
+    suite,
+    name: str,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Import multiple Galaxy tools from a tool suite directory.
+
+    Prompts the user to select which tools to import (default: all).
+    """
+    from rich.table import Table
+
+    from bioledger.forges.toolforge.translators.galaxy_context import (
+        GalaxySuiteContext,
+    )
+
+    if not isinstance(suite, GalaxySuiteContext):
+        raise TypeError("Expected GalaxySuiteContext")
+
+    # Show available tools
+    table = Table(title=f"Found {len(suite.xml_paths)} tool(s) in {suite.base_dir}")
+    table.add_column("#", style="dim")
+    table.add_column("File", style="cyan")
+    table.add_column("ID")
+    for i, xml_path in enumerate(suite.xml_paths, 1):
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.parse(xml_path).getroot()
+            tool_id = root.get("id", xml_path.stem)
+        except Exception:
+            tool_id = xml_path.stem
+        table.add_row(str(i), xml_path.name, tool_id)
+    console.print(table)
+
+    choice = Prompt.ask(
+        "Import which tools? (comma-sep numbers, or 'all')",
+        default="all",
+    )
+
+    if choice.strip().lower() == "all":
+        selected = suite.xml_paths
+    else:
+        try:
+            indices = {int(x.strip()) for x in choice.split(",")}
+            selected = [
+                suite.xml_paths[i - 1]
+                for i in sorted(indices)
+                if 1 <= i <= len(suite.xml_paths)
+            ]
+        except (ValueError, IndexError):
+            console.print("[red]Invalid selection[/red]")
+            raise typer.Exit(1)
+
+    if not selected:
+        console.print("[red]No tools selected[/red]")
+        raise typer.Exit(1)
+
+    # Import each selected tool
+    from bioledger.config import BioLedgerConfig
+    from bioledger.core.llm.agents import ForgeDeps
+    from bioledger.forges.toolforge.agent import ToolForgeAgent
+    from bioledger.forges.toolforge.translators.galaxy import import_galaxy_tool
+    from bioledger.ledger.models import LedgerSession
+
+    config = BioLedgerConfig()
+    agent = ToolForgeAgent(config)
+    dummy_session = LedgerSession(name="tool_import_temp")
+    deps = ForgeDeps(session=dummy_session, config=config, context_mode="utility")
+
+    for xml_path in selected:
+        console.print(f"\n[cyan]Importing {xml_path.name}…[/cyan]")
+        # Build a per-tool context that shares the suite's macros.xml
+        from bioledger.forges.toolforge.translators.galaxy_context import (
+            GalaxyImportContext,
+        )
+        tool_ctx = GalaxyImportContext(
+            xml_path=xml_path,
+            macros_xml_path=suite.macros_xml_path,
+            base_dir=suite.base_dir,
+        )
+        spec = await import_galaxy_tool(
+            xml_path, deps, agent, use_llm=True, context=tool_ctx
+        )
+        if name:
+            spec.execution.name = name
+        _finalize_tool_import(spec, dry_run=dry_run)
 
 
 @tool_app.command("validate")
@@ -191,6 +407,7 @@ def tool_validate(
     strict: bool = typer.Option(False, "--strict", help="Treat warnings as errors"),
 ) -> None:
     """Validate a tool spec file."""
+    from bioledger.apps.cli._ui import print_validation_issues
     from bioledger.toolspec.load import load_spec
     from bioledger.toolspec.validate import validate_spec
 
@@ -202,13 +419,7 @@ def tool_validate(
     else:
         console.print(f"[red]✗ {spec.name} has issues[/red]")
 
-    for issue in result.issues:
-        color = (
-            "red" if issue.severity.value == "error"
-            else "yellow" if issue.severity.value == "warning"
-            else "dim"
-        )
-        console.print(f"  [{color}]{issue.severity.value}[/{color}] {issue.field}: {issue.message}")
+    print_validation_issues(result, console, show_field=True)
 
     if not result.is_valid:
         raise typer.Exit(1)
@@ -270,19 +481,20 @@ def tool_show(name: str) -> None:
 
     if ex.inputs:
         console.print("\n  [bold]Inputs:[/bold]")
-        for k, v in ex.inputs.items():
-            console.print(f"    {k}: {v.format} ({'required' if v.required else 'optional'})")
+        for name, inp in ex.inputs.items():
+            req = "required" if inp.required else "optional"
+            console.print(f"    {name}: {inp.format} ({req})")
 
     if ex.outputs:
         console.print("\n  [bold]Outputs:[/bold]")
-        for k, v in ex.outputs.items():
-            console.print(f"    {k}: {v.format}")
+        for name, out in ex.outputs.items():
+            console.print(f"    {name}: {out.format}")
 
     if ex.parameters:
         console.print("\n  [bold]Parameters:[/bold]")
-        for k, v in ex.parameters.items():
-            default = f" = {v.default}" if v.default is not None else ""
-            console.print(f"    {k}: {v.type.value}{default}")
+        for name, param in ex.parameters.items():
+            default = f" = {param.default}" if param.default is not None else ""
+            console.print(f"    {name}: {param.type.value}{default}")
 
 
 @tool_app.command("export")
@@ -546,20 +758,16 @@ async def _analysis_chat(session_id: str) -> None:
                     input_files, parent_id = _resolve_inputs(
                         agent, tool_request, user_input
                     )
-                    from uuid import uuid4
-
-                    run_id = uuid4().hex[:8]
-                    output_dir = (
-                        config.home_dir
-                        / "outputs"
-                        / session.id
-                        / f"{tool_request.tool_name}_{run_id}"
+                    from bioledger.forges.analysisforge.executor import (
+                        get_session_dir,
                     )
+
+                    session_dir = get_session_dir(config.home_dir, session.id)
 
                     entry, run_result = await agent.run_tool_with_logging(
                         tool_request.tool_name,
                         input_files,
-                        output_dir,
+                        session_dir,
                         params=tool_request.params_as_dict(),
                         parent_id=parent_id,
                     )
@@ -774,6 +982,242 @@ def package(
         f"  Entries: {len(entry_ids) if entry_ids else len(session.entries)}"
     )
     console.print("  Includes: workflow.nf, data files, ledger.json")
+
+
+# --- Library commands ---
+
+
+def _libraries():
+    """Return configured BioLedgerConfig, ToolLibrary, and StudyLibrary."""
+    from bioledger.config import BioLedgerConfig
+    from bioledger.core.library import StudyLibrary, ToolLibrary
+
+    config = BioLedgerConfig()
+    config.ensure_dirs()
+    cache_dir = config.home_dir / "cache"
+    return config, ToolLibrary(cache_dir), StudyLibrary(cache_dir)
+
+
+@library_app.command("list")
+def library_list() -> None:
+    """List all available tools in the remote library."""
+    _config, lib, _study_lib = _libraries()
+    entries = lib.list_all()
+
+    if not entries:
+        console.print("[yellow]No tools found (check network or run 'library refresh')[/yellow]")
+        return
+
+    table = Table(title=f"Tool Library ({len(entries)} tools)")
+    table.add_column("Name", style="cyan")
+    table.add_column("Family")
+    table.add_column("Version")
+    table.add_column("Description")
+    table.add_column("Categories")
+
+    for e in entries:
+        table.add_row(
+            e["name"],
+            e.get("family", ""),
+            e.get("version", ""),
+            e.get("description", "")[:60],
+            ", ".join(e.get("categories", [])),
+        )
+    console.print(table)
+
+
+@library_app.command("search")
+def library_search(
+    query: str = typer.Argument(..., help="Search query"),
+) -> None:
+    """Search the tool library by name, category, or description."""
+    _config, lib, _study_lib = _libraries()
+    results = lib.search(query)
+
+    if not results:
+        console.print(f"[yellow]No tools matching '{query}'[/yellow]")
+        return
+
+    table = Table(title=f"Search results for '{query}' ({len(results)} matches)")
+    table.add_column("Name", style="cyan")
+    table.add_column("Family")
+    table.add_column("Description")
+
+    for e in results:
+        table.add_row(e["name"], e.get("family", ""), e.get("description", "")[:70])
+    console.print(table)
+
+
+@library_app.command("show")
+def library_show(
+    name: str = typer.Argument(..., help="Tool name to show details for"),
+) -> None:
+    """Show detailed info about a library tool."""
+    _config, lib, _study_lib = _libraries()
+    entry = lib.get(name)
+
+    if not entry:
+        console.print(f"[red]Tool '{name}' not found in library[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold cyan]{entry['name']}[/bold cyan] v{entry.get('version', '?')}")
+    console.print(f"  Family: {entry.get('family', '-')}")
+    console.print(f"  Description: {entry.get('description', '-')}")
+    console.print(f"  Container: {entry.get('container', '-')}")
+    console.print(f"  Categories: {', '.join(entry.get('categories', []))}")
+    console.print(f"  Inputs: {', '.join(entry.get('inputs', []))}")
+    console.print(f"  Outputs: {', '.join(entry.get('outputs', []))}")
+    console.print(f"  Path: {entry.get('path', '-')}")
+
+
+@library_app.command("import")
+def library_import(
+    name: str = typer.Argument(..., help="Tool name to import"),
+    ref: str = typer.Option("main", help="Git ref (branch/tag/commit) to pin"),
+) -> None:
+    """Import a tool from the library into the local store."""
+    from bioledger.toolspec.store import ToolStore
+
+    config, lib, _study_lib = _libraries()
+    store = ToolStore(tools_dir=config.home_dir / "tools")
+
+    # Find the tool's path in the library index
+    entry = lib.get(name)
+    if not entry:
+        console.print(f"[red]Tool '{name}' not found in library[/red]")
+        raise typer.Exit(1)
+
+    path = entry["path"]
+    try:
+        spec = store.import_from_library(path=path, ref=ref)
+        console.print(f"[green]Imported '{spec.name}' (ref={ref})[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+
+@library_app.command("refresh")
+def library_refresh() -> None:
+    """Force-refresh the tool library index from remote."""
+    _config, lib, _study_lib = _libraries()
+    lib.refresh()
+    entries = lib.list_all()
+    console.print(f"[green]Refreshed: {len(entries)} tools available[/green]")
+
+
+# --- Study commands ---
+
+
+@study_app.command("list")
+def study_list() -> None:
+    """List all available studies in the remote library."""
+    _config, _tool_lib, lib = _libraries()
+    entries = lib.list_all()
+
+    if not entries:
+        console.print("[yellow]No studies found (check network or run 'study refresh')[/yellow]")
+        return
+
+    table = Table(title=f"Study Library ({len(entries)} studies)")
+    table.add_column("Accession", style="cyan")
+    table.add_column("Type")
+    table.add_column("Organism")
+    table.add_column("Title")
+    table.add_column("Files")
+
+    for e in entries:
+        table.add_row(
+            e["accession"],
+            e.get("study_type", "").replace("_", " "),
+            e.get("organism", ""),
+            (e.get("title", "") or e.get("description", ""))[:50],
+            str(e.get("file_count", 0)),
+        )
+    console.print(table)
+
+
+@study_app.command("search")
+def study_search(
+    query: str = typer.Argument(..., help="Search query"),
+) -> None:
+    """Search the study library by organism, accession, or description."""
+    _config, _tool_lib, lib = _libraries()
+    results = lib.search(query)
+
+    if not results:
+        console.print(f"[yellow]No studies matching '{query}'[/yellow]")
+        return
+
+    table = Table(title=f"Search results for '{query}' ({len(results)} matches)")
+    table.add_column("Accession", style="cyan")
+    table.add_column("Organism")
+    table.add_column("Title")
+
+    for e in results:
+        table.add_row(
+            e["accession"],
+            e.get("organism", ""),
+            (e.get("title", "") or "")[:60],
+        )
+    console.print(table)
+
+
+@study_app.command("show")
+def study_show(
+    accession: str = typer.Argument(..., help="Study accession to show"),
+) -> None:
+    """Show detailed info about a library study."""
+    _config, _tool_lib, lib = _libraries()
+    entry = lib.get(accession)
+
+    if not entry:
+        console.print(f"[red]Study '{accession}' not found in library[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold cyan]{entry['accession']}[/bold cyan]")
+    console.print(f"  Type: {entry.get('study_type', '-').replace('_', ' ')}")
+    console.print(f"  Organism: {entry.get('organism', '-')}")
+    console.print(f"  Title: {entry.get('title', '-')}")
+    console.print(f"  Description: {entry.get('description', '-')}")
+    console.print(f"  Formats: {', '.join(entry.get('formats', []))}")
+    console.print(f"  Files: {entry.get('file_count', 0)}")
+
+
+@study_app.command("load")
+def study_load(
+    accession: str = typer.Argument(..., help="Study accession to load"),
+    download: bool = typer.Option(True, help="Download remote files"),
+) -> None:
+    """Load a study from the library (downloads files via manifest)."""
+    import asyncio
+
+    config, _tool_lib, lib = _libraries()
+    datasets_dir = config.home_dir / "datasets" / accession
+
+    async def _download() -> None:
+        await lib.download(accession, datasets_dir, with_data=download)
+
+    try:
+        asyncio.run(_download())
+        if download:
+            console.print(f"[green]Study '{accession}' downloaded to {datasets_dir}[/green]")
+        else:
+            console.print(
+                f"[green]Study metadata for '{accession}' saved to {datasets_dir}[/green]"
+            )
+            console.print("  Run with --download to fetch data files")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+
+@study_app.command("refresh")
+def study_refresh() -> None:
+    """Force-refresh the study library index from remote."""
+    _config, _tool_lib, lib = _libraries()
+    lib.refresh()
+    entries = lib.list_all()
+    console.print(f"[green]Refreshed: {len(entries)} studies available[/green]")
 
 
 if __name__ == "__main__":

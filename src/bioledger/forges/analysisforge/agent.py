@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -124,6 +125,11 @@ class AnalysisForgeAgent:
         self.tool_store = ToolStore()
         self.dataset: DataSet | None = None
 
+        # Initialize library client for auto-import
+        from bioledger.core.library import ToolLibrary
+
+        self._tool_library = ToolLibrary(cache_dir=config.home_dir / "cache")
+
         # Build dynamic tool list for the system prompt
         available_tools = self.tool_store.list_all()
         if available_tools:
@@ -132,7 +138,20 @@ class AnalysisForgeAgent:
                 for t in available_tools
             )
         else:
-            tools_list = "(No tools available - import tools with 'bioledger tool import')"
+            tools_list = "(No tools locally imported yet)"
+
+        # Include library tools so the LLM can suggest them for auto-import
+        # Use list_cached() to avoid network fetch during construction
+        library_entries = self._tool_library.list_cached()
+        local_names = {t.name for t in available_tools}
+        library_only = [e for e in library_entries if e["name"] not in local_names]
+        if library_only:
+            library_list = "\n".join(
+                f"- {e['name']}: {e.get('description', '')}"
+                for e in library_only
+            )
+        else:
+            library_list = ""
 
         # Main conversational agent — structured output with explicit intent
         self._chat_agent = make_agent(
@@ -151,9 +170,17 @@ class AnalysisForgeAgent:
                 "fetch_entry_outputs tool to get the actual output — never guess. "
                 "When the user wants to package results, help them review and "
                 "select entries.\n\n"
-                f"Available tools you can run:\n{tools_list}\n\n"
-                "IMPORTANT: When the user asks to run a tool, immediately set "
+                f"Locally installed tools:\n{tools_list}\n\n"
+                + (
+                    f"Additional tools available from the library (auto-imported on use):\n"
+                    f"{library_list}\n\n"
+                    if library_list
+                    else ""
+                )
+                + "IMPORTANT: When the user asks to run a tool, immediately set "
                 "intent='suggest_tool' and suggested_tool=<name>. "
+                "You may suggest tools from the library — they will be "
+                "auto-imported when run. "
                 "Do NOT ask the user to confirm — confirmation is handled "
                 "separately by the system. "
                 "Use intent='respond' for all other conversational replies. "
@@ -360,18 +387,30 @@ class AnalysisForgeAgent:
         self,
         tool_name: str,
         input_files: dict[str, Path],
-        output_dir: Path,
+        session_dir: Path,
         params: dict | None = None,
         parent_id: str | None = None,
     ) -> tuple[LedgerEntry, Any]:
-        """Run a tool and log everything to the session."""
+        """Run a tool and log everything to the session.
+
+        If the tool is not locally available but exists in the library,
+        it is auto-imported before execution.
+        """
+        # Auto-import from library if not locally available
+        if not self.tool_store.has(tool_name):
+            lib_entry = self._tool_library.get(tool_name)
+            if lib_entry:
+                logging.info("Auto-importing tool '%s' from library", tool_name)
+                self.tool_store.import_from_library(path=lib_entry["path"])
+                logging.info("Auto-imported tool '%s'", tool_name)
+
         spec = self.tool_store.load(tool_name)
 
         entry, result = run_tool(
             self.session,
             spec,
             input_files,
-            output_dir,
+            session_dir,
             params=params,
             parent_id=parent_id,
         )

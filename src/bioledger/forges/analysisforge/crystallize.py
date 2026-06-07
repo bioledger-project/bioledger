@@ -57,29 +57,20 @@ def _proc_name(entry: LedgerEntry, index: int) -> str:
 
 
 def _input_name_to_filename(entry: LedgerEntry) -> dict[str, str]:
-    """Extract mapping of tool input name -> filename from the entry.
+    """Extract mapping of tool input name -> staged filename from the entry.
 
-    Uses container.volumes bindings (host_path -> /input/{name}) cross-referenced
-    with entry.files (role=='input') to recover the tool-input-name -> filename
-    mapping that was used at execution time.
+    Uses ContainerInfo.input_mapping which records {slot: staged_basename}
+    from the per-run staging process. This maps directly to Nextflow's
+    `path <name>` declarations.
     """
     mapping: dict[str, str] = {}
-    if not entry.container or not entry.container.volumes:
+    if not entry.container:
         return mapping
-    input_file_paths = {
-        Path(f.path).resolve(): Path(f.path).name
-        for f in entry.files
-        if f.role == "input"
-    }
-    for host_path, bind_path in entry.container.volumes.items():
-        if not bind_path.startswith("/input/"):
-            continue
-        name = bind_path.removeprefix("/input/").split("/", 1)[0]
-        host_dir = Path(host_path).resolve()
-        for abs_path, filename in input_file_paths.items():
-            if abs_path.parent == host_dir:
-                mapping[name] = filename
-                break
+
+    # input_mapping records {slot: staged_basename} from per-run staging
+    if entry.container.input_mapping:
+        for name, staged_basename in entry.container.input_mapping.items():
+            mapping[name] = staged_basename
     return mapping
 
 
@@ -102,13 +93,17 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
             return " ".join(entry.container.command)
         return "echo 'no command'"
     # Jinja context: inputs use Nextflow shell variables; output dir is '.'
+    # Historical ledger entries may have stored parameters as a list;
+    # current entries store a dict. Handle both.
+    params_data = spec.get("parameters") or {}
+    if isinstance(params_data, list):
+        params_dict = {p.get("name"): p.get("default") for p in params_data}
+    else:
+        params_dict = {k: v.get("default") for k, v in params_data.items()}
     context = {
         "inputs": {name: f"${{{name}}}" for name in input_names},
         "outputs": {"_dir": "."},
-        "parameters": {
-            k: v.get("default")
-            for k, v in (spec.get("parameters") or {}).items()
-        },
+        "parameters": params_dict,
     }
     try:
         return Template(template_str).render(context)

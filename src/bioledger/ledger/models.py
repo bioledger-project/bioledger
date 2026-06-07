@@ -41,6 +41,7 @@ class ContainerInfo(BaseModel):
     command: list[str]
     volumes: dict[str, str] = {}  # host_path → container_path
     env: dict[str, str] = {}
+    input_mapping: dict[str, str] = {}  # tool_input_name → work-dir relative path
 
 
 class LLMCallInfo(BaseModel):
