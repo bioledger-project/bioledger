@@ -97,7 +97,10 @@ def from_nextflow_module(dsl2_str: str) -> ExecutionSpec:
             line = line.strip()
             path_match = re.match(r"path\s+(\w+)", line)
             if path_match:
-                inputs[path_match.group(1)] = ToolInput(type=ParamType.FILE, format="any")
+                iname = path_match.group(1)
+                inputs[iname] = ToolInput(
+                    name=iname, type=ParamType.FILE, format="any"
+                )
 
     # Extract output declarations
     outputs: dict[str, ToolOutput] = {}
@@ -115,7 +118,9 @@ def from_nextflow_module(dsl2_str: str) -> ExecutionSpec:
             if path_match:
                 pattern = path_match.group(1)
                 emit_name = path_match.group(2) or f"out_{len(outputs)}"
-                outputs[emit_name] = ToolOutput(pattern=pattern, format="any")
+                outputs[emit_name] = ToolOutput(
+                    name=emit_name, pattern=pattern, format="any"
+                )
 
     # Extract script block
     script_match = re.search(

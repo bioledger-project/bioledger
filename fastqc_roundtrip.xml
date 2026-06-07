@@ -1,0 +1,68 @@
+<?xml version='1.0' encoding='utf-8'?>
+<tool id="fastqc" name="fastqc" version="0.74+galaxy1">
+  <description>Read Quality reports</description>
+  <requirements>
+    <container type="docker">quay.io/biocontainers/fastqc:0.12.1</container>
+  </requirements>
+  <command detect_errors="exit_code">#import re
+        #set input_name = re.sub('[^\w\-\s]', '_', str($input_file.element_identifier))
+
+        #if $input_file.ext.endswith('.gz'):
+            #set input_file_sl = $input_name + '.gz'
+        #elif $input_file.ext.endswith('.bz2'):
+            #set input_file_sl = $input_name + '.bz2'
+        #else
+            #set input_file_sl = $input_name
+        #end if
+
+        #if 'bam' in $input_file.ext:
+            #set format = 'bam'
+        #elif 'sam' in $input_file.ext:
+            #set format = 'sam'
+        #else
+            #set format = 'fastq'
+        #end if
+
+        ln -s '${input_file}' '${input_file_sl}' &amp;&amp;
+        mkdir -p '${html_file.files_path}' &amp;&amp;
+        fastqc
+            --outdir '${html_file.files_path}'
+            #if $contaminants.dataset and str($contaminants) &gt; ''
+                --contaminants '${contaminants}'
+            #end if
+
+            #if $adapters.dataset and str($adapters) &gt; ''
+                --adapters '${adapters}'
+            #end if
+
+            #if $limits.dataset and str($limits) &gt; ''
+                --limits '${limits}'
+            #end if
+            --threads \${GALAXY_SLOTS:-2}
+            --dir \${TEMP:-\$_GALAXY_JOB_TMP_DIR}
+            --quiet
+            --extract
+            #if $min_length:
+                --min_length $min_length
+            #end if
+            $nogroup
+            --kmers $kmers
+            -f '${format}'
+            '${input_file_sl}'
+
+        &amp;&amp; cp '${html_file.files_path}'/*/fastqc_data.txt output.txt
+        &amp;&amp; cp '${html_file.files_path}'/*\.html output.html</command>
+  <inputs>
+    <param name="input_file" type="data" format="fastq" label="Raw read data from your current history" />
+    <param name="contaminants" type="data" format="tabular" label="Contaminant list" />
+    <param name="adapters" type="data" format="tabular" label="Adapter list" />
+    <param name="limits" type="data" format="txt" label="Submodule and Limit specifing file" />
+    <param name="nogroup" label="Disable grouping of bases for reads &gt;50bp" type="boolean" checked="false" />
+    <param name="min_length" label="Lower limit on the length of the sequence to be shown in the report" type="integer" value="0" />
+    <param name="kmers" label="Length of Kmer to look for" type="integer" value="7" min="2" max="10" />
+  </inputs>
+  <outputs>
+    <data name="html_file" format="html" label="${tool.name} on ${on_string}: Webpage" />
+    <data name="text_file" format="txt" label="${tool.name} on ${on_string}: RawData" />
+  </outputs>
+</tool>

@@ -1,0 +1,2 @@
+Sample Name	Protocol REF	Raw Data File
+sample_001	sequencing	sample.fastq

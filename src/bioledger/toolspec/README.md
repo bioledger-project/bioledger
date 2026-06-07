@@ -187,7 +187,7 @@ These strings are recognized without warnings:
 ```
 fastq  fasta  bam    sam    cram   vcf    bcf    bed
 gff    gtf    bigwig html   txt    csv    tsv    json
-png    pdf    h5ad   any
+png    pdf    h5ad   tabular  any
 ```
 
 Other strings are accepted (INFO-level notice only) — use them when no standard applies, e.g. `"parquet"` or `"mzml"`.

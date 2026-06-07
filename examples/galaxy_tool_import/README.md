@@ -2,9 +2,17 @@
 
 BioLedger's ToolForge can import existing [Galaxy](https://galaxyproject.org/) tool wrappers and convert them into BioLedger tool specs. This means you can reuse the thousands of tools already wrapped for Galaxy without rewriting anything.
 
-## Starting point
+## Files in this directory
 
-This directory contains `fastqc.xml` — the official Galaxy tool wrapper for [FastQC](https://www.bioinformatics.babraham.ac.uk/projects/fastqc/) from the [Intergalactic Utilities Commission (IUC)](https://github.com/galaxyproject/tools-iuc) repository.
+- **`fastqc.xml`** — Galaxy tool wrapper for [FastQC](https://www.bioinformatics.babraham.ac.uk/projects/fastqc/) from the [IUC repository](https://github.com/galaxyproject/tools-iuc)
+- **`trimmomatic.nf`** — Example Nextflow DSL2 process for importing (Trimmomatic)
+- **`isatab/`** — Complete ISA-Tab dataset directory with synthetic test data:
+  - `i_investigation.txt` — Investigation metadata
+  - `s_study.txt` — Study with one sample
+  - `a_assay.txt` — Sequencing assay pointing to the FASTQ
+  - `sample.fastq` — Tiny synthetic FASTQ file (4 reads)
+
+The Galaxy tool wrapper is the main example:
 
 > **Source:** https://github.com/galaxyproject/tools-iuc/blob/main/tools/fastqc/rgFastQC.xml  
 > **Retrieved:** 2025-04-11  
@@ -101,6 +109,26 @@ bioledger tool validate ~/.bioledger/tools/fastqc.bioledger.yaml
 # ✓ fastqc is valid
 ```
 
+## LLM-enhanced import (optional)
+
+For complex Galaxy tools with Cheetah templating, use `--use-llm` to get additional analysis and fixes:
+
+```bash
+# Requires an LLM API key (OpenAI, Google, Anthropic, or Azure)
+export OPENAI_API_KEY="your-key-here"
+
+# Import with LLM assistance
+bioledger tool import examples/galaxy_tool_import/fastqc.xml --use-llm
+
+# The LLM will:
+# - Check for Galaxy-specific constructs that need manual fixes
+# - Identify .element_identifier, .dataset, str() calls, etc.
+# - Suggest specific fixes for Cheetah→Jinja2 conversion issues
+# - Provide conceptual validation of the tool spec
+```
+
+Without `--use-llm`, the import is purely programmatic (faster, no API key needed), but you may need to manually fix Galaxy-specific constructs in the command template.
+
 ## Export back to Galaxy or Nextflow
 
 Tool specs are format-agnostic. Export to either platform:
@@ -118,23 +146,48 @@ bioledger tool export fastqc --format nextflow -o fastqc.nf
 ToolForge also imports Nextflow DSL2 processes:
 
 ```bash
-bioledger tool import trimmomatic.nf
+bioledger tool import examples/galaxy_tool_import/trimmomatic.nf
+# ✓ Imported 'trimmomatic' → ~/.bioledger/tools/trimmomatic.bioledger.yaml
 ```
 
-## Use in a session
+The `trimmomatic.nf` file in this directory shows a typical Nextflow process with:
+- Container image from Biocontainers
+- Input tuple with metadata and reads
+- Multiple output channels
+- Script block with conditional logic
 
-Once imported, the tool is available in any interactive session:
+## Test the import in a session
+
+BioLedger runs everything within interactive sessions for provenance tracking. To test FastQC:
 
 ```bash
-bioledger resume <session_id>
+# Import the tool
+bioledger tool import examples/galaxy_tool_import/fastqc.xml
+
+# Start a new session
+bioledger session new fastqc-test
+
+# Resume the session and load the ISA-Tab dataset
+bioledger resume fastqc-test
 ```
 
+Once in the chat:
+
 ```
-you> run fastqc on the raw reads
+you> load examples/galaxy_tool_import/isatab/
+Loaded dataset "Sample FastQC Test Dataset"
+  Samples: 1
+  Organisms: Homo sapiens
+  File formats: fastq
+  Files: 1
+
+you> run fastqc on the sample
 assistant> Suggested: fastqc
-           Params: {threads: 4}
+           Reason: Quality control analysis for the raw FASTQ data
            Run this tool? [y/N]: y
 ```
+
+The session tracks the complete provenance: dataset loading → tool suggestion → execution → outputs.
 
 ## See also
 

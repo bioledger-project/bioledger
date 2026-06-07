@@ -117,8 +117,6 @@ def test_tools_list_format_for_system_prompt(tmp_path):
             description="A test tool for regression testing",
             container="python:3.11-slim",
             command="echo test",
-            inputs={},
-            outputs={},
             status=SpecStatus.VALID,
         )
     )
