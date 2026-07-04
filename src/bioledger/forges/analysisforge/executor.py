@@ -27,6 +27,25 @@ from bioledger.toolspec.models import (
 )
 
 
+# File names used when persisting container stdout/stderr to disk.
+_LOG_NAMES = ("stdout.log", "stderr.log")
+
+
+def _persist_logs(run_dir: Path, result: RunResult) -> set[str]:
+    """Write container stdout/stderr to run_dir and return resolved paths.
+
+    These paths are used to exclude the log files from output discovery,
+    since they are written after the pre_snapshot and would otherwise be
+    picked up as new/modified files by the fallback discovery.
+    """
+    log_paths: set[str] = set()
+    for name, text in (("stdout.log", result.stdout), ("stderr.log", result.stderr)):
+        path = run_dir / name
+        path.write_text(text, encoding="utf-8")
+        log_paths.add(str(path.resolve()))
+    return log_paths
+
+
 # Custom Jinja2 filters for Galaxy-converted templates
 def _basename(path: str) -> str:
     """Get the filename from a path (like Python's os.path.basename)."""
@@ -166,6 +185,7 @@ def _discover_outputs(
     run_dir: Path,
     pre_snapshot: dict[str, float],
     staged_input_paths: set[str],
+    exclude_paths: set[str] | None = None,
 ) -> list[Path]:
     """Discover output files using declared output patterns + change detection.
 
@@ -215,6 +235,8 @@ def _discover_outputs(
             if key in seen:
                 continue
             if key in staged_input_paths:
+                continue
+            if exclude_paths and key in exclude_paths:
                 continue
             old_mtime = pre_snapshot.get(key)
             if old_mtime is None or p.stat().st_mtime > old_mtime:
@@ -338,6 +360,9 @@ def run_tool(
         workdir=f"/sessions/runs/{run_id}",
     )
 
+    # Persist full stdout/stderr for later inspection and LLM diagnosis.
+    log_paths = _persist_logs(run_dir, result)
+
     # Build input file refs. Path is the STAGED path (basename matches
     # input_mapping and the crystallize/RO-Crate layout); hashing follows the
     # symlink to the real content.
@@ -353,7 +378,9 @@ def run_tool(
             )
 
     # Discover and record outputs via pattern globs
-    output_paths = _discover_outputs(spec, run_dir, pre_snapshot, staged_input_paths)
+    output_paths = _discover_outputs(
+        spec, run_dir, pre_snapshot, staged_input_paths, exclude_paths=log_paths
+    )
     for out_path in output_paths:
         # Output paths are inside run_dir; store absolute path
         file_refs.append(
@@ -362,6 +389,17 @@ def run_tool(
                 size_bytes=out_path.stat().st_size, role="output",
             )
         )
+
+    # Attach log file refs so the full stdout/stderr are tracked in the ledger.
+    for name in _LOG_NAMES:
+        path = run_dir / name
+        if path.exists():
+            file_refs.append(
+                FileRef(
+                    path=str(path), sha256=_hash_file(path),
+                    size_bytes=path.stat().st_size, role="log",
+                )
+            )
 
     entry = LedgerEntry(
         id=run_id,
@@ -434,6 +472,9 @@ def run_script(
         workdir=f"/sessions/runs/{run_id}",
     )
 
+    # Persist full stdout/stderr for later inspection.
+    log_paths = _persist_logs(run_dir, result)
+
     # Capture script + input files + outputs
     file_refs = [
         FileRef(
@@ -453,7 +494,9 @@ def run_script(
             )
 
     # Discover outputs
-    output_paths = _discover_outputs(spec, run_dir, pre_snapshot, staged_input_paths)
+    output_paths = _discover_outputs(
+        spec, run_dir, pre_snapshot, staged_input_paths, exclude_paths=log_paths
+    )
     for out_path in output_paths:
         file_refs.append(
             FileRef(
@@ -461,6 +504,17 @@ def run_script(
                 size_bytes=out_path.stat().st_size, role="output",
             )
         )
+
+    # Attach log file refs.
+    for name in _LOG_NAMES:
+        path = run_dir / name
+        if path.exists():
+            file_refs.append(
+                FileRef(
+                    path=str(path), sha256=_hash_file(path),
+                    size_bytes=path.stat().st_size, role="log",
+                )
+            )
 
     entry = LedgerEntry(
         id=run_id,

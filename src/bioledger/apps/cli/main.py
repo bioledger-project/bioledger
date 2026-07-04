@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from rich.prompt import Prompt
@@ -797,16 +798,16 @@ async def _analysis_chat(session_id: str) -> None:
                         if output_snippets:
                             response += "\n" + "\n".join(output_snippets)
                     else:
-                        stderr_snippet = run_result.stderr[:400]
+                        snippet = _failure_snippet(run_result, Path(entry.files[0].path).parent)
                         fail_msg = (
                             f"{tool_request.tool_name} failed "
-                            f"(exit {run_result.exit_code}):\n{stderr_snippet}"
+                            f"(exit {run_result.exit_code}):\n{snippet}"
                         )
                         console.print(f"\n[red]{fail_msg}[/red]")
                         # Ask the LLM to diagnose and suggest next steps
                         diagnosis = await agent._chat_agent.run(
                             f"The tool '{tool_request.tool_name}' just failed with this error:\n"
-                            f"{stderr_snippet}\n\n"
+                            f"{snippet}\n\n"
                             "Diagnose the problem in one sentence and suggest the specific "
                             "next step the user should take to fix it (e.g. run a different "
                             "tool first, change a parameter, use a different file format).",
@@ -840,6 +841,31 @@ async def _analysis_chat(session_id: str) -> None:
         # Record assistant response
         session.add_message("assistant", response, forge="analysisforge")
         store.append_message(session.id, session.chat_messages[-1])
+
+
+def _failure_snippet(result: Any, run_dir: Path, max_chars: int = 3000) -> str:
+    """Return a tail-biased snippet of tool output for console display and LLM diagnosis.
+
+    Tools like GATK/Picard emit verbose startup banners at the start of stderr
+    and put the actual error near the end. A head-slice would hide the real
+    failure message, so we bias toward the tail.
+    """
+    text = result.stderr or ""
+    source = "stderr"
+    if not text.strip():
+        text = result.stdout or ""
+        source = "stdout"
+    if not text:
+        return "(no output captured)"
+
+    if len(text) <= max_chars:
+        return text
+
+    tail = text[-max_chars:]
+    return (
+        f"[showing last {max_chars} chars of {source} — "
+        f"full log: {run_dir / source}.log]\n{tail}"
+    )
 
 
 def _resolve_inputs(

@@ -77,9 +77,10 @@ def test_run_tool_creates_isolated_run_dir(
     assert len(run_dirs) == 1
     run_dir = run_dirs[0]
 
-    # Output was discovered
-    assert len(entry.files) == 1
-    assert entry.files[0].path.endswith("output.txt")
+    # Output was discovered (logs are also tracked, so filter by role)
+    output_files = [f for f in entry.files if f.role == "output"]
+    assert len(output_files) == 1
+    assert output_files[0].path.endswith("output.txt")
 
     # Output file physically exists in the run dir
     assert (run_dir / "output.txt").exists()
