@@ -8,8 +8,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from jinja2 import Environment
-
 from bioledger.core.containers.docker import DockerRunner, RunResult
 from bioledger.ledger.models import (
     ContainerInfo,
@@ -18,6 +16,7 @@ from bioledger.ledger.models import (
     LedgerEntry,
     LedgerSession,
 )
+from bioledger.toolspec import get_jinja_env
 from bioledger.toolspec.models import (
     ExecutionSpec,
     ParamType,
@@ -25,7 +24,6 @@ from bioledger.toolspec.models import (
     ToolInput,
     ToolSpec,
 )
-
 
 # File names used when persisting container stdout/stderr to disk.
 _LOG_NAMES = ("stdout.log", "stderr.log")
@@ -46,41 +44,8 @@ def _persist_logs(run_dir: Path, result: RunResult) -> set[str]:
     return log_paths
 
 
-# Custom Jinja2 filters for Galaxy-converted templates
-def _basename(path: str) -> str:
-    """Get the filename from a path (like Python's os.path.basename)."""
-    return os.path.basename(path)
-
-
-def _splitext(path: str) -> list[str]:
-    """Split path into [root, ext] (like Python's os.path.splitext)."""
-    root, ext = os.path.splitext(path)
-    return [root, ext]
-
-
-def _stem(path: str, all: bool = False) -> str:
-    """Get the filename without extension (like pathlib.Path.stem).
-
-    When ``all`` is True, iteratively strip all extensions (e.g.
-    ``reference.fna.gz`` → ``reference``). When False (default), only the
-    last extension is removed.
-    """
-    basename = os.path.basename(path)
-    if not all:
-        return os.path.splitext(basename)[0]
-    while True:
-        root, ext = os.path.splitext(basename)
-        if not ext or root == "":
-            break
-        basename = root
-    return basename
-
-
-# Jinja2 environment with custom filters
-_jinja_env = Environment()
-_jinja_env.filters["basename"] = _basename
-_jinja_env.filters["splitext"] = _splitext
-_jinja_env.filters["stem"] = _stem
+# Reuse the canonical Jinja2 environment with BioLedger custom filters
+_jinja_env = get_jinja_env()
 
 
 def _hash_file(path: Path, chunk_size: int = 8192) -> str:

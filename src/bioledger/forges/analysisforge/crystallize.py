@@ -4,9 +4,8 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 
-from jinja2 import Template
-
 from bioledger.ledger.models import EntryKind, LedgerEntry, LedgerSession
+from bioledger.toolspec import get_jinja_env
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +105,7 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
         "parameters": params_dict,
     }
     try:
-        return Template(template_str).render(context)
+        return get_jinja_env().from_string(template_str).render(context)
     except Exception:
         logger.warning("Failed to render Nextflow script for %s", entry.id)
         if entry.container and entry.container.command:

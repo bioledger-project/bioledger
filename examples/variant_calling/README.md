@@ -207,22 +207,22 @@ NCBI distributes reference genomes as standard gzip (`.gz`), but `samtools faidx
 Each gets its own isolated run directory under `~/.bioledger/sessions/abc123de/runs/`:
 
 ```
-you> run bgzip on GCF_000227135.1_ASM22713v2_genomic.fna.gz
+you> run bgzip on GCF_000227135_1_ASM22713v2_genomic.fna.gz
 assistant> Suggested: bgzip
            Params: {}
            Run this tool? [y/N]: y
 assistant> bgzip completed. Outputs: [GCF_000227135.1_ASM22713v2_genomic.fna.gz]
 
-you> run samtools-faidx on GCF_000227135.1_ASM22713v2_genomic.fna.gz
+you> run samtools-faidx on GCF_000227135_1_ASM22713v2_genomic.fna.gz
 assistant> Suggested: samtools-faidx
            Params: {}
            Run this tool? [y/N]: y
 assistant> samtools-faidx completed. Outputs: [GCF_000227135.1_ASM22713v2_genomic.fna.gz.fai]
 
-you> run samtools-dict on GCF_000227135.1_ASM22713v2_genomic.fna.gz
+you> run samtools-dict on GCF_000227135_1_ASM22713v2_genomic.fna.gz
 assistant> samtools-dict completed. Outputs: [GCF_000227135.1_ASM22713v2_genomic.dict]
 
-you> run bwa-mem2-index on GCF_000227135.1_ASM22713v2_genomic.fna.gz
+you> run bwa-mem2-index on GCF_000227135_1_ASM22713v2_genomic.fna.gz
 assistant> bwa-mem2-index completed. Outputs: [.0123, .amb, .ann, .bwt.2bit.64, .pac]
 ```
 
@@ -233,7 +233,7 @@ assistant> bwa-mem2-index completed. Outputs: [.0123, .amb, .ann, .bwt.2bit.64, 
 We'll process one sample (SRR7133733, the CL isolate). Repeat for the other two samples to call variants across all three.
 
 ```
-you> run bwa-mem2-mem with ref GCF_000227135.1_ASM22713v2_genomic.fna.gz and reads SRR7133733_1.fastq.gz SRR7133733_2.fastq.gz
+you> run bwa-mem2-mem with ref GCF_000227135_1_ASM22713v2_genomic.fna.gz and reads SRR7133733_1.fastq.gz SRR7133733_2.fastq.gz
 assistant> Suggested: bwa-mem2-mem
            Params: {threads: 4, read_group: "@RG\\tID:SRR7133733\\tSM:CL\\tPL:ILLUMINA"}
            Run this tool? [y/N]: y
@@ -249,7 +249,7 @@ assistant> samtools-index completed. Outputs: [sorted.bam.bai]
 ### 5.4 Call variants with GATK
 
 ```
-you> run gatk-haplotypecaller with ref GCF_000227135.1_ASM22713v2_genomic.fna.gz and bam sorted.bam
+you> run gatk-haplotypecaller with ref GCF_000227135_1_ASM22713v2_genomic.fna.gz and bam sorted.bam
 assistant> Suggested: gatk-haplotypecaller
            Params: {ploidy: 2, stand_call_conf: 30.0}
            Run this tool? [y/N]: y

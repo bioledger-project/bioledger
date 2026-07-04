@@ -1,5 +1,7 @@
 """Tool specification models, validation, and local registry."""
 
+from bioledger_toolspec_schema import get_jinja_env, render_command
+
 from .models import (
     ExecutionSpec,
     ExecutionSpecDraft,
@@ -29,4 +31,6 @@ __all__ = [
     "ValidationIssue",
     "ValidationResult",
     "validate_spec",
+    "get_jinja_env",
+    "render_command",
 ]
