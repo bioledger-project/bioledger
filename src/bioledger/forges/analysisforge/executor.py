@@ -58,9 +58,22 @@ def _splitext(path: str) -> list[str]:
     return [root, ext]
 
 
-def _stem(path: str) -> str:
-    """Get the filename without extension (like pathlib.Path.stem)."""
-    return os.path.splitext(os.path.basename(path))[0]
+def _stem(path: str, all: bool = False) -> str:
+    """Get the filename without extension (like pathlib.Path.stem).
+
+    When ``all`` is True, iteratively strip all extensions (e.g.
+    ``reference.fna.gz`` → ``reference``). When False (default), only the
+    last extension is removed.
+    """
+    basename = os.path.basename(path)
+    if not all:
+        return os.path.splitext(basename)[0]
+    while True:
+        root, ext = os.path.splitext(basename)
+        if not ext or root == "":
+            break
+        basename = root
+    return basename
 
 
 # Jinja2 environment with custom filters

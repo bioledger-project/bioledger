@@ -98,7 +98,7 @@ execution:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** | — | Unique tool identifier. Used on the CLI (`bioledger tool show <name>`) and as the filename. |
-| `version` | string | no (warning if missing) | `""` | Free-form version label. Does not need to match the container tag. |
+| `version` | string | no (warning if missing) | `""` | **External tool version** (e.g. `"1.20"` for samtools). Do NOT change this when editing the spec wrapper; it belongs to the upstream tool authors. |
 | `description` | string | no (warning if missing) | `""` | One-sentence summary. Shown to the LLM when it picks tools. |
 | `container` | string | **yes** | — | Fully qualified Docker image URI (e.g. `quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0`). |
 | `command` | string | **yes** | — | Jinja2 command template. See [below](#command-templates). |
@@ -107,6 +107,18 @@ execution:
 | `parameters` | map | no | `{}` | Non-file parameters (threads, flags, options). See [Parameters](#parameters). |
 | `categories` | list of strings | no | `[]` | Free-form tags used for grouping and LLM hints (e.g. `alignment`, `qc`, `variant_calling`). |
 | `status` | enum | no | `draft` | One of `draft`, `valid`, `enriched`. Set automatically by `validate_spec`; do not hand-set. |
+
+### Versioning fields — what to bump when
+
+Three fields sound like "versions" but have different jobs:
+
+| Field | What it tracks | Who changes it | Example |
+|-------|----------------|----------------|---------|
+| `spec_version` | The **YAML schema format** (field names, structure). Bumped when the parser or validator needs a migration. | Schema maintainers | `"0.1"` → `"0.2"` |
+| `revision` | The **spec wrapper definition** (command template, inputs, outputs). Bump every time you fix or improve the wrapper, independent of the tool version. | Spec authors | `"1"` → `"2"` |
+| `execution.version` | The **upstream tool's version** (samtools, GATK, etc.). Never change this unless the Docker image upgrades to a new tool release. | Tool authors | `"1.20"` → `"1.21"` |
+
+**Rule of thumb:** when you edit a spec, bump `revision`. When the upstream tool ships a new release, bump `execution.version` (and the container). When BioLedger changes the YAML schema itself, `spec_version` is bumped for you by the schema maintainers.
 
 ### Command templates
 
@@ -124,6 +136,15 @@ Rules:
 2. `{{outputs._dir}}` is the only supported output-side template variable today. Write all outputs there; BioLedger discovers every file in `/output` after the run and records them.
 3. Multi-line commands should use YAML block scalars (`>-` or `|`) so quoting stays readable.
 4. The rendered string is passed through `shlex.split`; if that fails (complex shell syntax), it falls back to `sh -c "<command>"`. If you rely on pipes, redirects, or `$VAR` expansion, `sh -c` will be used automatically.
+
+**Custom Jinja2 filters available in command templates:**
+
+| Filter | Example input | Result | Use case |
+|--------|---------------|--------|----------|
+| `basename` | `/data/sample.fastq` | `sample.fastq` | Extract filename from path |
+| `splitext` | `/data/sample.fastq` | `['/data/sample', '.fastq']` | Split into [root, ext] |
+| `stem` | `sample.fastq.gz` | `sample.fastq` | Strip one extension |
+| `stem(true)` | `reference.fna.gz` | `reference` | Strip **all** extensions (e.g. for GATK `.dict` naming) |
 
 ### Inputs
 

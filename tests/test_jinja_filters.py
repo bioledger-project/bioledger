@@ -125,6 +125,27 @@ class TestGalaxyCommandTemplates:
         result = tmpl.render(**context)
         assert result == 'sample'
 
+    def test_stem_filter_all_true(self):
+        """Stem with all=True strips every extension."""
+        context = {'inputs': {'input_file': '/input/sample.fastq.gz'}}
+        tmpl = _jinja_env.from_string('{{ inputs.input_file | stem(true) }}')
+        result = tmpl.render(**context)
+        assert result == 'sample'
+
+    def test_stem_filter_all_true_fna_gz(self):
+        """Stem with all=True handles .fna.gz → base name for GATK dict."""
+        context = {'inputs': {'input_file': '/input/reference.fna.gz'}}
+        tmpl = _jinja_env.from_string('{{ inputs.input_file | stem(true) }}.dict')
+        result = tmpl.render(**context)
+        assert result == 'reference.dict'
+
+    def test_stem_filter_all_preserves_hidden_file(self):
+        """Stem with all=True does not strip leading-dot hidden files."""
+        context = {'inputs': {'input_file': '/input/.hidden'}}
+        tmpl = _jinja_env.from_string('{{ inputs.input_file | stem(true) }}')
+        result = tmpl.render(**context)
+        assert result == '.hidden'
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
