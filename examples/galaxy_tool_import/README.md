@@ -1,5 +1,7 @@
 # Example: Importing a Galaxy Tool
 
+> 🚧 **Work in progress** — Galaxy tool import is still under construction. The commands and output below describe the intended workflow, not a tested one yet.
+
 BioLedger's ToolForge can import existing [Galaxy](https://galaxyproject.org/) tool wrappers and convert them into BioLedger tool specs. This means you can reuse the thousands of tools already wrapped for Galaxy without rewriting anything.
 
 ## Files in this directory

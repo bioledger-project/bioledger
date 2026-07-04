@@ -1,5 +1,7 @@
 # Example: CSV Samplesheet to ISA-Tab
 
+> 🚧 **Work in progress** — automatic CSV-to-ISA-Tab conversion is still under construction. The workflow below describes the intended behavior, not a tested one yet.
+
 Most researchers start with a CSV samplesheet, not ISA-Tab. BioLedger's AnalysisForge automatically routes CSVs through ISAForge to generate proper ISA-Tab metadata before loading. This ensures strong provenance tracking even when you don't have ISA-Tab yet.
 
 ## Why ISA-Tab matters
