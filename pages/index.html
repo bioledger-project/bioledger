@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BioLedger</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="page">
+    <nav class="top">
+      <a href="#top">Home</a>
+      <a href="#documentation">Documentation</a>
+      <a href="examples/index.html">Examples</a>
+      <a href="https://bioledger-project.github.io/toolspec-library/">Tool Library</a>
+      <a href="https://bioledger-project.github.io/isatab-library/">Study Library</a>
+      <a href="https://github.com/d-callan/bioledger">GitHub</a>
+    </nav>
+
+    <header class="hero" id="top">
+      <img src="assets/logo.png" alt="BioLedger logo">
+      <p class="tagline">A provenance-tracking interactive analysis environment that retrospectively produces reproducible artifacts — ISA-Tab, workflows, and RO-Crate.</p>
+      <div class="cta">
+        <a href="https://github.com/d-callan/bioledger">View on GitHub</a>
+        <a class="secondary" href="examples/index.html">See the examples</a>
+      </div>
+    </header>
+
+    <section id="structured-metadata">
+      <h2>Structured metadata, not spreadsheets</h2>
+      <p>Free-text CSV columns are ambiguous — an AI has to guess what "organism" or "sample" means. <strong>ISA-Tab</strong> gives BioLedger structured, ontology-backed metadata instead: sources, samples, characteristics, and assays with formal relationships between them. That structure is what lets an LLM reason reliably about your data — which files belong to which sample, which organism they came from, what assay produced them — instead of pattern-matching on column names.</p>
+    </section>
+
+    <section id="run-anywhere">
+      <h2>Run anywhere, no lock-in</h2>
+      <p>BioLedger tool specs are <strong>language- and execution-agnostic</strong>: a container image plus a declarative command template, input/output contract, and parameters. That means BioLedger runs tools <em>itself</em>, locally, in Docker — you're not tied to a third-party platform or orchestrator to get your analysis done. Local execution also means every run is fully observable: BioLedger records the exact command, container, and file hashes, giving you reproducibility and traceability without depending on someone else's infrastructure.</p>
+    </section>
+
+    <section id="experiments-not-workflows">
+      <h2>Think in experiments, not workflows</h2>
+      <p>Researchers don't design a pipeline up front — they load some data, try a tool, look at the output, and decide what's next. BioLedger is built around that reality: every action you take (tool runs, imports, LLM calls, notes) is recorded in an append-only <strong>ledger</strong> as you work. The workflow and RO-Crate aren't something you author — they're <strong>crystallized after the fact</strong> from the ledger, as an artifact that makes what you did reproducible for someone else (including future you).</p>
+    </section>
+
+    <section id="llm-where-it-earns-it">
+      <h2>LLM where it earns its keep</h2>
+      <p>The LLM is used only where judgment genuinely helps — suggesting a next step, resolving how one tool's output should feed the next tool's input, fixing malformed imports. Everything else is deterministic and programmatic: execution, file hashing, provenance linking, and artifact generation. Because the ledger records every action and every LLM message as a first-class, file-based artifact, the whole history is independently verifiable — you don't have to trust a model's summary of what happened.</p>
+    </section>
+
+    <section id="roadmap">
+      <h2>Roadmap</h2>
+      <p><strong>Near-term:</strong> Galaxy API key support (run tools against a Galaxy instance you already have credentials for) and native Nextflow workflow execution, in addition to local Docker.</p>
+      <p><strong>Longer-term:</strong> have BioLedger generate its own library assets — ingesting Galaxy tools or nf-core modules as BioLedger tool specs, or turning an NCBI BioProject accession into an ISA-Tab study by querying NCBI directly. Until that's automated, these assets are produced by hand and contributed to the library repos or kept locally.</p>
+    </section>
+
+    <section id="documentation">
+      <h2>Documentation</h2>
+      <p>Schema references for the two formats BioLedger builds on, each auto-generated from the live Pydantic models so they can't drift from the code:</p>
+      <div class="card-grid">
+        <div class="card">
+          <h3><a href="https://bioledger-project.github.io/toolspec-schema/">Tool Spec Reference</a></h3>
+          <p>Guide + field-by-field reference for the BioLedger tool spec format (ExecutionSpec, InterfaceSpec, inputs/outputs/parameters).</p>
+        </div>
+        <div class="card">
+          <h3><a href="https://bioledger-project.github.io/isatab-schema/">ISA-Tab Schema Reference</a></h3>
+          <p>Guide + field-by-field reference for BioLedger-flavored ISA-Tab (study specs, manifest/download metadata, validation rules).</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="libraries">
+      <h2>Explore the libraries</h2>
+      <p>BioLedger hosts two small, growing public libraries of ready-to-use assets. They're searchable here, and discoverable directly from the CLI (<code>bioledger library list</code>, <code>bioledger study list</code>) — tools are auto-imported on first use.</p>
+      <div class="card-grid">
+        <div class="card">
+          <h3><a href="https://bioledger-project.github.io/toolspec-library/">Tool Spec Library</a></h3>
+          <p>Curated bioinformatics tool specs (samtools, bwa-mem2, GATK, bcftools, and more) ready to run with <code>bioledger tool import</code>.</p>
+        </div>
+        <div class="card">
+          <h3><a href="https://bioledger-project.github.io/isatab-library/">Study Library</a></h3>
+          <p>Reference genomes and experimental datasets as ISA-Tab studies, downloadable with <code>bioledger study load</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="examples">
+      <h2>Examples</h2>
+      <p>Complete end-to-end walkthroughs, kept in sync with the <code>examples/</code> directory in the repo — from a first "hello world" session to a full variant-calling pipeline built entirely from the public libraries.</p>
+      <p><a href="examples/index.html">Browse the examples &rarr;</a></p>
+    </section>
+
+    <footer>
+      MIT licensed. <a href="https://github.com/d-callan/bioledger">Source on GitHub</a>.
+    </footer>
+  </div>
+</body>
+</html>

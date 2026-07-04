@@ -80,6 +80,7 @@ ISA-Tab to reproducible package without writing workflow syntax. See the [full w
 
 - **[Galaxy tool import](examples/galaxy_tool_import/)** — import existing Galaxy tool wrappers into BioLedger
 - **[CSV to ISA-Tab](examples/csv_to_isatab/)** — start from a plain samplesheet and convert to structured metadata
+- **[Variant calling on *L. donovani*](examples/variant_calling/)** — use the public library repos to discover tools and data, then run a full pipeline end-to-end
 
 ## Prerequisites
 
@@ -126,6 +127,13 @@ pip install -e .
 # With all optional dependencies
 pip install -e ".[cli,isaforge,toolforge,analysis,crateforge,dev]"
 ```
+
+> **Schema dependencies**: BioLedger depends on `bioledger-toolspec-schema` and `bioledger-isatab-schema`, which live in sibling repositories. If you see `ModuleNotFoundError`, install them first in editable mode:
+>
+> ```bash
+> pip install -e ../bioledger-toolspec-schema
+> pip install -e ../bioledger-isatab-schema
+> ```
 
 Or with conda:
 
