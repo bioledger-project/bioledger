@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from bioledger_isatab_schema.utils import warn_on_ambiguous_periods
 
 logger = logging.getLogger(__name__)
 
@@ -235,5 +236,10 @@ class StudyLibrary:
 
             await download_manifest(manifest, dest_dir, user_confirmed=True)
             logger.info("Downloaded data files for %s", accession)
+
+            # Warn on filenames with ambiguous periods (e.g. NCBI accessions)
+            for fpath in dest_dir.iterdir():
+                if fpath.is_file() and fpath.name not in ("manifest.yaml",):
+                    warn_on_ambiguous_periods(fpath.name)
 
         return dest_dir
