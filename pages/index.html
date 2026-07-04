@@ -32,8 +32,8 @@
     </section>
 
     <section id="run-anywhere">
-      <h2>Run anywhere, no lock-in</h2>
-      <p>BioLedger tool specs are <strong>language- and execution-agnostic</strong>: a container image plus a declarative command template, input/output contract, and parameters. That means BioLedger runs tools <em>itself</em>, locally, in Docker — you're not tied to a third-party platform or orchestrator to get your analysis done. Local execution also means every run is fully observable: BioLedger records the exact command, container, and file hashes, giving you reproducibility and traceability without depending on someone else's infrastructure.</p>
+      <h2>Run anywhere you have Docker</h2>
+      <p>BioLedger tool specs are <strong>language- and execution-agnostic</strong>: a container image plus a declarative command template, input/output contract, and parameters. Today BioLedger runs tools locally via Docker — you're not tied to a third-party platform or orchestrator to get your analysis done. That means every run is fully observable: BioLedger records the exact command, container, and file hashes, giving you reproducibility and traceability without depending on someone else's infrastructure. Cluster environments using Singularity aren't supported yet.</p>
     </section>
 
     <section id="experiments-not-workflows">
@@ -49,6 +49,7 @@
     <section id="roadmap">
       <h2>Roadmap</h2>
       <p><strong>Near-term:</strong> Galaxy API key support (run tools against a Galaxy instance you already have credentials for) and native Nextflow workflow execution, in addition to local Docker.</p>
+      <p><strong>Execution expansion:</strong> We want BioLedger to run on the platforms researchers already use — submitting batch jobs to HPC clusters, supporting Singularity for sites without Docker, and cloud execution. Today it's local Docker only; these are the next frontiers.</p>
       <p><strong>Longer-term:</strong> have BioLedger generate its own library assets — ingesting Galaxy tools or nf-core modules as BioLedger tool specs, or turning an NCBI BioProject accession into an ISA-Tab study by querying NCBI directly. Until that's automated, these assets are produced by hand and contributed to the library repos or kept locally.</p>
     </section>
 
