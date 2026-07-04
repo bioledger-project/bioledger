@@ -245,6 +245,13 @@ class AnalysisForgeAgent:
         AnalysisForge always works with ISA-Tab internally for proper
         provenance and metadata tracking.
         """
+        path = path.expanduser()
+        # If path doesn't exist directly, try ~/.bioledger/datasets/<name>
+        if not path.exists():
+            candidate = self.config.home_dir / "datasets" / path.name
+            if candidate.exists():
+                path = candidate
+
         if path.is_file() and path.suffix.lower() == ".csv":
             # Route through ISAForge: CSV → ISA-Tab → load
             isatab_dir = (

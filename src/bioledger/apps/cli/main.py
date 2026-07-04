@@ -682,7 +682,7 @@ async def _analysis_chat(session_id: str) -> None:
             continue
 
         if user_input.lower().startswith("load "):
-            data_path = Path(user_input.split(" ", 1)[1].strip())
+            data_path = Path(user_input.split(" ", 1)[1].strip()).expanduser()
             try:
                 dataset = await agent.load_dataset(data_path)
 
@@ -797,13 +797,30 @@ async def _analysis_chat(session_id: str) -> None:
                         if output_snippets:
                             response += "\n" + "\n".join(output_snippets)
                     else:
-                        response = (
+                        stderr_snippet = run_result.stderr[:400]
+                        fail_msg = (
                             f"{tool_request.tool_name} failed "
-                            f"(exit {run_result.exit_code}): "
-                            f"{run_result.stderr[:200]}"
+                            f"(exit {run_result.exit_code}):\n{stderr_snippet}"
                         )
+                        console.print(f"\n[red]{fail_msg}[/red]")
+                        # Ask the LLM to diagnose and suggest next steps
+                        diagnosis = await agent._chat_agent.run(
+                            f"The tool '{tool_request.tool_name}' just failed with this error:\n"
+                            f"{stderr_snippet}\n\n"
+                            "Diagnose the problem in one sentence and suggest the specific "
+                            "next step the user should take to fix it (e.g. run a different "
+                            "tool first, change a parameter, use a different file format).",
+                            deps=deps,
+                            message_history=deps.message_history(),
+                        )
+                        response = fail_msg + "\n\n" + diagnosis.output.message
 
-                    console.print(f"\n[blue]assistant>[/blue] {response}")
+                    display = (
+                        diagnosis.output.message
+                        if run_result.exit_code != 0
+                        else response
+                    )
+                    console.print(f"\n[blue]assistant>[/blue] {display}")
                 else:
                     response = (
                         "OK, skipping tool run. What would you like to do "
@@ -832,11 +849,24 @@ def _resolve_inputs(
 ) -> tuple[dict[str, Path], str | None]:
     """Resolve input file paths from tool request mapping.
 
-    Resolution order for each input_name -> source:
+    Resolution is done in two phases so that an EXACT filename match from
+    any source always wins over a fuzzy (substring/format) match from any
+    source. This matters because derived sidecar files (e.g. a samtools
+    '<ref>.dict') often contain an earlier file's exact name as a
+    substring — without this phase ordering, such a sidecar can shadow the
+    real file it was derived from.
+
+    Phase 1 (exact name only), in priority order:
       1. Literal file path (if exists on disk)
-      2. Match against prior session output files (by filename or substring)
-      3. Match against dataset files (by filename, format, or substring)
-      4. Search ISA-Tab directory for structural files
+      2. Prior session tool/script output whose filename matches exactly
+      3. Dataset file whose filename matches exactly
+      4. ISA-Tab directory structural file (already exact by construction)
+      5. ~/.bioledger/datasets/ recursive search (already exact by construction)
+
+    Phase 2 (fuzzy fallback, only if nothing matched exactly above):
+      6. Prior session output matched by substring
+      7. Prior session output matched by declared input format (extension)
+      8. Dataset file matched by substring or format
 
     Returns:
         (input_files, parent_id) — parent_id is set only when an input
@@ -867,12 +897,14 @@ def _resolve_inputs(
                     filename_hint = maybe_name
                     break
 
-        # 1. Literal path
-        p = Path(source)
+        # 1. Literal path (expand ~ so ~/... paths work)
+        p = Path(source).expanduser()
         if p.exists():
             resolved = p
 
-        # 2. Search prior session outputs (most recent first).
+        # --- Phase 1: exact-name matches across all sources ---
+
+        # 2. Search prior session outputs by EXACT name (most recent first).
         #    When an entry_id prefix hint is given, only match that entry.
         if resolved is None:
             for entry in reversed(agent.session.entries):
@@ -883,22 +915,25 @@ def _resolve_inputs(
                 for f in entry.files:
                     if f.role == "output":
                         fp = Path(f.path)
-                        if fp.name == filename_hint or filename_hint in str(fp):
+                        if fp.name == filename_hint:
                             resolved = fp
                             parent_id = entry.id
                             break
                 if resolved:
                     break
 
-        # 3. Search dataset files (assay data files)
+        # 3. Search dataset files by EXACT name.
         if resolved is None and agent.dataset:
+            isa_dir = agent.dataset.isa_tab_dir
             for f in agent.dataset.files:
                 loc = f.downloaded_path or f.location
                 lp = Path(loc)
-                if lp.name == source or source in str(lp) or f.format == source:
-                    if lp.exists():
-                        resolved = lp
-                        break
+                # ISA-Tab stores filenames as relative paths — anchor to isa_tab_dir
+                if not lp.is_absolute() and isa_dir:
+                    lp = isa_dir / lp
+                if lp.name == filename_hint and lp.exists():
+                    resolved = lp
+                    break
 
         # 4. Search ISA-Tab directory for structural files
         #    (s_study.txt, a_assay.txt, i_investigation.txt, etc.)
@@ -906,6 +941,79 @@ def _resolve_inputs(
             candidate = agent.dataset.isa_tab_dir / source
             if candidate.exists():
                 resolved = candidate
+
+        # 5. Search ~/.bioledger/datasets/ recursively by EXACT filename.
+        #    Covers reference genomes and other studies downloaded via
+        #    'bioledger study load' that aren't in the currently-loaded dataset.
+        if resolved is None:
+            datasets_dir = agent.config.home_dir / "datasets"
+            if datasets_dir.is_dir():
+                matches = sorted(datasets_dir.rglob(filename_hint))
+                if matches:
+                    resolved = matches[0]
+
+        # --- Phase 2: fuzzy fallback (only if no exact match found anywhere) ---
+
+        # 6. Search prior session outputs by substring (most recent first).
+        if resolved is None:
+            for entry in reversed(agent.session.entries):
+                if entry.kind not in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN):
+                    continue
+                if entry_prefix_hint and not entry.id.startswith(entry_prefix_hint):
+                    continue
+                for f in entry.files:
+                    if f.role == "output":
+                        fp = Path(f.path)
+                        if filename_hint in str(fp):
+                            resolved = fp
+                            parent_id = entry.id
+                            break
+                if resolved:
+                    break
+
+        # 7. Format-based fallback: source didn't match by name, but if the tool
+        #    spec declares a format for this input, match the most recent prior
+        #    output whose extension matches that format.
+        if resolved is None:
+            try:
+                spec = agent.tool_store.load(tool_request.tool_name)
+                declared_format = (
+                    spec.execution.inputs.get(input_name, None)
+                    if spec.execution.inputs
+                    else None
+                )
+                fmt = getattr(declared_format, "format", None)
+            except Exception:
+                fmt = None
+            if fmt and fmt not in ("any", ""):
+                for entry in reversed(agent.session.entries):
+                    if entry.kind not in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN):
+                        continue
+                    if entry_prefix_hint and not entry.id.startswith(entry_prefix_hint):
+                        continue
+                    for f in entry.files:
+                        if f.role == "output":
+                            fp = Path(f.path)
+                            if fp.suffix.lstrip(".").lower() == fmt.lower():
+                                resolved = fp
+                                parent_id = entry.id
+                                break
+                    if resolved:
+                        break
+
+        # 8. Search dataset files by substring or declared format.
+        if resolved is None and agent.dataset:
+            isa_dir = agent.dataset.isa_tab_dir
+            for f in agent.dataset.files:
+                loc = f.downloaded_path or f.location
+                lp = Path(loc)
+                if not lp.is_absolute() and isa_dir:
+                    lp = isa_dir / lp
+                name_match = filename_hint in str(lp)
+                if name_match or f.format == filename_hint:
+                    if lp.exists():
+                        resolved = lp
+                        break
 
         if resolved is None:
             raise ValueError(
