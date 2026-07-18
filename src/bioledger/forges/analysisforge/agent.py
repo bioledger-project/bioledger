@@ -11,7 +11,12 @@ from pydantic_ai import RunContext
 
 from bioledger.config import BioLedgerConfig
 from bioledger.core.llm.agents import ForgeDeps, make_agent
-from bioledger.forges.analysisforge.executor import run_tool
+from bioledger.forges.analysisforge.executor import (
+    get_session_dir,
+    poll_tool,
+    run_tool,
+    submit_tool,
+)
 from bioledger.forges.analysisforge.suggest import suggest_analysis_for_dataset
 from bioledger.forges.isaforge.builder import csv_to_isatab
 from bioledger.forges.isaforge.dataset import (
@@ -21,6 +26,7 @@ from bioledger.forges.isaforge.dataset import (
 from bioledger.forges.isaforge.download import download_remote_files
 from bioledger.ledger.models import EntryKind, FileRef, LedgerEntry, LedgerSession
 from bioledger.ledger.store import LedgerStore
+from bioledger.toolspec.models import ExecutionMode
 from bioledger.toolspec.store import ToolStore
 
 
@@ -168,6 +174,9 @@ class AnalysisForgeAgent:
                 "After each tool run, report results and suggest next steps. "
                 "When the user asks about results from a tool run, use the "
                 "fetch_entry_outputs tool to get the actual output — never guess. "
+                "When the user asks about job status or whether a background "
+                "job has finished, use the check_job_status tool to get "
+                "accurate, real-time status for all jobs. "
                 "When the user wants to package results, help them review and "
                 "select entries.\n\n"
                 f"Locally installed tools:\n{tools_list}\n\n"
@@ -221,6 +230,27 @@ class AnalysisForgeAgent:
                     header = f"Outputs for {entry.tool_spec_name} run {entry_id}:"
                     return header + "\n\n" + "\n\n".join(snippets)
             return f"No entry found with ID '{entry_id}'."
+
+        @self._chat_agent.tool
+        def check_job_status(ctx: RunContext[ForgeDeps]) -> str:
+            """Check the status of all background jobs in the session.
+            Use this when the user asks about job status, running tasks,
+            or whether something has finished. Returns a summary of every
+            tool/script run entry with its current status."""
+            lines: list[str] = []
+            for entry in ctx.deps.session.entries:
+                if entry.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN):
+                    outputs = [
+                        Path(f.path).name for f in entry.files if f.role == "output"
+                    ]
+                    lines.append(
+                        f"  {entry.id} ({entry.tool_spec_name}): "
+                        f"status={entry.run_status}, exit={entry.exit_code}, "
+                        f"outputs={outputs}"
+                    )
+            if not lines:
+                return "No tool/script runs in this session."
+            return "Job statuses:\n" + "\n".join(lines)
 
         # Tool selection agent — structured output
         self._tool_select_agent = make_agent(
@@ -390,6 +420,21 @@ class AnalysisForgeAgent:
         )
         return result.output
 
+    def get_tool_spec(self, tool_name: str) -> Any:
+        """Load a tool spec, auto-importing from the library if needed.
+
+        Shared by run_tool_with_logging() and callers (e.g. the CLI) that
+        need to peek at spec details — like suggested_mode — before
+        deciding how to run it.
+        """
+        if not self.tool_store.has(tool_name):
+            lib_entry = self._tool_library.get(tool_name)
+            if lib_entry:
+                logging.info("Auto-importing tool '%s' from library", tool_name)
+                self.tool_store.import_from_library(path=lib_entry["path"])
+                logging.info("Auto-imported tool '%s'", tool_name)
+        return self.tool_store.load(tool_name)
+
     async def run_tool_with_logging(
         self,
         tool_name: str,
@@ -397,32 +442,69 @@ class AnalysisForgeAgent:
         session_dir: Path,
         params: dict | None = None,
         parent_id: str | None = None,
+        mode: ExecutionMode | None = None,
     ) -> tuple[LedgerEntry, Any]:
         """Run a tool and log everything to the session.
 
         If the tool is not locally available but exists in the library,
         it is auto-imported before execution.
+
+        mode: None defers to the tool spec's `suggested_mode`. When the
+        effective mode is ASYNC, submits the container and returns
+        immediately with (entry, None) — the entry has run_status="running"
+        and container_id set. Call poll_pending_jobs() later to finalize it.
+        When BLOCKING, behaves as before: (entry, RunResult).
         """
-        # Auto-import from library if not locally available
-        if not self.tool_store.has(tool_name):
-            lib_entry = self._tool_library.get(tool_name)
-            if lib_entry:
-                logging.info("Auto-importing tool '%s' from library", tool_name)
-                self.tool_store.import_from_library(path=lib_entry["path"])
-                logging.info("Auto-imported tool '%s'", tool_name)
+        spec = self.get_tool_spec(tool_name)
+        effective_mode = mode or spec.execution.suggested_mode
 
-        spec = self.tool_store.load(tool_name)
+        if effective_mode == ExecutionMode.ASYNC:
+            entry = submit_tool(
+                self.session,
+                spec,
+                input_files,
+                session_dir,
+                params=params,
+                parent_id=parent_id,
+            )
+            self.store.save_session(self.session)
+            return entry, None
 
-        entry, result = run_tool(
-            self.session,
-            spec,
-            input_files,
-            session_dir,
-            params=params,
-            parent_id=parent_id,
-        )
+        try:
+            entry, result = run_tool(
+                self.session,
+                spec,
+                input_files,
+                session_dir,
+                params=params,
+                parent_id=parent_id,
+            )
+        except TimeoutError:
+            self.store.save_session(self.session)
+            raise
         self.store.save_session(self.session)
         return entry, result
+
+    def poll_pending_jobs(self) -> list[LedgerEntry]:
+        """Check all running background jobs; finalize any that completed.
+
+        Only scans entries with run_status == "running" (not the full
+        history). Persists the session if anything changed. Returns the
+        entries that just transitioned out of "running" this call.
+        """
+        session_dir = get_session_dir(self.config.home_dir, self.session.id)
+        newly_completed = []
+        changed = False
+        for entry in self.session.entries:
+            if entry.run_status != "running":
+                continue
+            poll_tool(entry, session_dir)
+            if entry.run_status != "running":
+                newly_completed.append(entry)
+                changed = True
+        if changed:
+            self.store.save_session(self.session)
+        return newly_completed
 
     def review_entries(self) -> list[dict]:
         """Return a summary of all session entries for user review."""
@@ -441,6 +523,7 @@ class AnalysisForgeAgent:
                 "outputs": outputs,
                 "params": entry.params,
                 "exit_code": entry.exit_code,
+                "run_status": entry.run_status,
                 "notes": entry.notes or "",
                 "parent_id": entry.parent_id,
             }
@@ -460,9 +543,14 @@ class AnalysisForgeAgent:
                 out_files = [
                     Path(f.path).name for f in entry.files if f.role == "output"
                 ]
+                status = (
+                    "running in background"
+                    if entry.run_status == "running"
+                    else f"exit={entry.exit_code}"
+                )
                 lines.append(
                     f"  [{entry.id}] {entry.tool_spec_name} -> "
-                    f"{', '.join(out_files)} (exit={entry.exit_code})"
+                    f"{', '.join(out_files)} ({status})"
                 )
             elif entry.kind == EntryKind.DATA_IMPORT:
                 lines.append(f"  [{entry.id}] data_import: {entry.notes}")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -75,6 +75,18 @@ class LedgerEntry(BaseModel):
     notes: str = ""
     exit_code: int | None = None
     duration_seconds: float | None = None
+    # Async tool-run tracking. Default "completed" preserves the meaning of
+    # all pre-existing entries (no migration needed — entries are stored as
+    # JSON blobs). "running" + container_id set means the container was
+    # submitted but not yet polled to completion; "unknown" covers the case
+    # where the container/job was lost (e.g. daemon restart, externally
+    # removed). This 5-value set is a superset shaped to also accommodate
+    # future HPC scheduler states (Slurm/LSF PENDING/RUNNING/COMPLETED/
+    # FAILED/CANCELLED) without redesign.
+    run_status: Literal["pending", "running", "completed", "failed", "unknown"] = (
+        "completed"
+    )
+    container_id: str | None = None  # set while run_status == "running"
 
 
 class LedgerSession(BaseModel):

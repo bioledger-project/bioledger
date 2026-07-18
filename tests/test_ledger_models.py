@@ -123,3 +123,50 @@ def test_ledger_session_serialization():
     assert loaded.name == "Test Session"
     assert len(loaded.entries) == 1
     assert len(loaded.chat_messages) == 1
+
+
+class TestAsyncRunStatus:
+    """Tests for run_status/container_id (async tool execution tracking)."""
+
+    def test_default_run_status_is_completed(self):
+        """Default preserves the meaning of pre-existing entries with no
+        migration needed — a bare LedgerEntry() is assumed already done."""
+        entry = LedgerEntry(kind=EntryKind.TOOL_RUN)
+        assert entry.run_status == "completed"
+        assert entry.container_id is None
+
+    def test_running_entry_with_container_id(self):
+        entry = LedgerEntry(
+            kind=EntryKind.TOOL_RUN,
+            run_status="running",
+            container_id="abc123def456",
+        )
+        assert entry.run_status == "running"
+        assert entry.container_id == "abc123def456"
+        assert entry.exit_code is None
+
+    def test_run_status_round_trip_serialization(self):
+        entry = LedgerEntry(
+            kind=EntryKind.TOOL_RUN,
+            run_status="running",
+            container_id="deadbeef",
+        )
+        loaded = LedgerEntry.model_validate_json(entry.model_dump_json())
+        assert loaded.run_status == "running"
+        assert loaded.container_id == "deadbeef"
+
+    def test_backward_compat_load_without_new_fields(self):
+        """Entries persisted before run_status/container_id existed must
+        still load, defaulting run_status to 'completed'."""
+        old_style_json = (
+            '{"kind": "tool_run", "tool_spec_name": "bwa", "exit_code": 0}'
+        )
+        loaded = LedgerEntry.model_validate_json(old_style_json)
+        assert loaded.run_status == "completed"
+        assert loaded.container_id is None
+        assert loaded.exit_code == 0
+
+    def test_all_run_status_values_accepted(self):
+        for status in ("pending", "running", "completed", "failed", "unknown"):
+            entry = LedgerEntry(kind=EntryKind.TOOL_RUN, run_status=status)
+            assert entry.run_status == status

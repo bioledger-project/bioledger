@@ -190,7 +190,8 @@ class TestRunToolLogFileRefs:
 
         with patch("bioledger.forges.analysisforge.executor.DockerRunner") as MockRunner:
             instance = MockRunner.return_value
-            instance.run.return_value = mock_result
+            instance.submit.return_value = "fake-container-id"
+            instance.poll.return_value = mock_result
 
             entry, result = run_tool(
                 session=session,
@@ -234,7 +235,8 @@ class TestRunToolLogFileRefs:
 
         with patch("bioledger.forges.analysisforge.executor.DockerRunner") as MockRunner:
             instance = MockRunner.return_value
-            instance.run.return_value = mock_result
+            instance.submit.return_value = "fake-container-id"
+            instance.poll.return_value = mock_result
 
             entry, result = run_script(
                 session=session,

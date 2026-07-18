@@ -21,6 +21,8 @@ def _build_dag(
     by_id: dict[str, LedgerEntry] = {}
     for entry in session.entries:
         if entry.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN):
+            if entry.run_status not in ("completed", "failed"):
+                continue
             children[entry.parent_id].append(entry)
             by_id[entry.id] = entry
     return children, by_id
@@ -235,7 +237,9 @@ def to_nextflow_from_entries(entries: list[LedgerEntry]) -> str:
     parallel branches, which is a valid Nextflow pattern.
     """
     tool_entries = [
-        e for e in entries if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
+        e for e in entries
+        if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
+        and e.run_status in ("completed", "failed")
     ]
     return _render_workflow(tool_entries)
 

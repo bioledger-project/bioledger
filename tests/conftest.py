@@ -111,3 +111,17 @@ def tmp_tools_dir(tmp_path):
 def tmp_db_path(tmp_path):
     """Temporary path for LedgerStore SQLite database."""
     return tmp_path / "test_ledger.db"
+
+
+@pytest.fixture
+def docker_available() -> bool:
+    """Check whether a Docker daemon is reachable. Tests that require
+    Docker should use this and pytest.skip() if False."""
+    try:
+        import docker
+
+        client = docker.from_env()
+        client.ping()
+        return True
+    except Exception:
+        return False

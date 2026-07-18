@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shlex
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -188,6 +190,8 @@ def _discover_outputs(
             key = str(match.resolve())
             if key in seen:
                 continue
+            if exclude_paths and key in exclude_paths:
+                continue
             # Only include new/modified files
             if match.is_file():
                 old_mtime = pre_snapshot.get(key)
@@ -197,11 +201,17 @@ def _discover_outputs(
             elif match.is_dir() and is_dir_pattern:
                 # Capture all files within a directory output
                 for child in match.rglob("*"):
-                    if child.is_file():
-                        child_key = str(child.resolve())
-                        if child_key not in seen:
-                            output_paths.append(child)
-                            seen.add(child_key)
+                    if not child.is_file():
+                        continue
+                    child_key = str(child.resolve())
+                    if child_key in seen:
+                        continue
+                    if child_key in staged_input_paths:
+                        continue
+                    if exclude_paths and child_key in exclude_paths:
+                        continue
+                    output_paths.append(child)
+                    seen.add(child_key)
 
     # Fallback: if spec declares no patterns (or none matched), capture any
     # new/modified files as outputs (excluding staged inputs)
@@ -270,82 +280,24 @@ def get_tool_run_dir(home_dir: Path, session_id: str, run_id: str) -> Path:
     return run_dir
 
 
-def run_tool(
-    session: LedgerSession,
-    spec: ToolSpec,
-    input_files: dict[str, Path],
-    session_dir: Path,
-    params: dict | None = None,
-    parent_id: str | None = None,
-) -> tuple[LedgerEntry, RunResult]:
-    """Execute a tool via Docker in an isolated per-run working directory.
-
-    Each run gets its own directory under sessions/<id>/runs/<entry_id>/,
-    mounted at /work. Inputs are staged as symlinks (for in-session sources)
-    or copies (for external sources). Outputs are discovered via declared
-    pattern globs.
-
-    Args:
-        session: The active ledger session.
-        spec: Tool specification to execute.
-        input_files: Mapping of tool input names to resolved host paths.
-        session_dir: The session's root directory (for staging decisions).
-        params: Tool parameter overrides.
-        parent_id: Optional parent entry ID for DAG linkage.
-    """
-    runner = DockerRunner()
-
-    # Generate run_id and create isolated run directory
-    run_id = uuid.uuid4().hex[:20]
-    run_dir = session_dir / "runs" / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    # Stage inputs (symlink for in-session sources, copy for external)
-    input_mapping = _stage_inputs(input_files, session_dir, run_dir)
-
-    # Snapshot empty run_dir for change detection
-    pre_snapshot = _snapshot_dir(run_dir)
-
-    # Build staged input path set for fallback exclusion
-    staged_input_paths = {str((run_dir / name).resolve()) for name in input_mapping.values()}
-
-    # Mount full session dir so relative symlinks to sibling run dirs resolve.
-    volumes = {str(session_dir): {"bind": "/sessions", "mode": "rw"}}
-    container_run_dir = f"/sessions/runs/{run_id}"
-
-    # Render command with paths rooted at the container's run directory.
-    rendered_cmd = _render_command(
-        spec, input_mapping, params or {}, work_mount=container_run_dir
-    )
-
-    # Shell detection
+def _to_shell_command(rendered_cmd: str) -> list[str]:
+    """Decide whether a rendered command needs a shell wrapper (pipes,
+    redirects, etc.) or can be split into an argv list directly."""
     shell_operators = ["&&", "||", "|", ";", "<", ">", "$(", "`", "\n"]
-    needs_shell = any(op in rendered_cmd for op in shell_operators)
+    if any(op in rendered_cmd for op in shell_operators):
+        return ["sh", "-c", rendered_cmd]
+    try:
+        return shlex.split(rendered_cmd)
+    except ValueError:
+        return ["sh", "-c", rendered_cmd]
 
-    if needs_shell:
-        command = ["sh", "-c", rendered_cmd]
-    else:
-        try:
-            command = shlex.split(rendered_cmd)
-        except ValueError:
-            command = ["sh", "-c", rendered_cmd]
 
-    # Run with workdir at the run directory (inside the mounted session tree)
-    result = runner.run(
-        image=spec.container,
-        command=command,
-        volumes=volumes,
-        workdir=f"/sessions/runs/{run_id}",
-    )
-
-    # Persist full stdout/stderr for later inspection and LLM diagnosis.
-    log_paths = _persist_logs(run_dir, result)
-
-    # Build input file refs. Path is the STAGED path (basename matches
-    # input_mapping and the crystallize/RO-Crate layout); hashing follows the
-    # symlink to the real content.
+def _build_input_file_refs(input_mapping: dict[str, str], run_dir: Path) -> list[FileRef]:
+    """Build FileRefs for staged inputs. Path is the STAGED path (basename
+    matches input_mapping and the crystallize/RO-Crate layout); hashing
+    follows the symlink to the real content."""
     file_refs = []
-    for name, staged_basename in input_mapping.items():
+    for staged_basename in input_mapping.values():
         staged_path = run_dir / staged_basename
         if staged_path.exists():
             file_refs.append(
@@ -354,30 +306,112 @@ def run_tool(
                     size_bytes=staged_path.stat().st_size, role="input",
                 )
             )
+    return file_refs
 
-    # Discover and record outputs via pattern globs
+
+def _finalize_entry(
+    entry: LedgerEntry,
+    spec: ToolSpec,
+    run_dir: Path,
+    result: RunResult,
+    pre_snapshot: dict[str, float],
+    staged_input_paths: set[str],
+) -> LedgerEntry:
+    """Populate an entry's outputs/logs/status from a completed RunResult.
+
+    Shared by the blocking path (immediately after runner.run()/poll())
+    and the async poll path (poll_tool(), once the container reaches a
+    terminal state) so output discovery/hashing logic isn't duplicated.
+    Mutates and returns the same entry (LedgerEntry is not frozen).
+    """
+    log_paths = _persist_logs(run_dir, result)
+    # Also exclude the pre-snapshot sidecar so it doesn't leak as a spurious
+    # output via the fallback discovery path.
+    snapshot_path = run_dir / "_pre_snapshot.json"
+    if snapshot_path.exists():
+        log_paths.add(str(snapshot_path.resolve()))
+
     output_paths = _discover_outputs(
         spec, run_dir, pre_snapshot, staged_input_paths, exclude_paths=log_paths
     )
     for out_path in output_paths:
-        # Output paths are inside run_dir; store absolute path
-        file_refs.append(
+        entry.files.append(
             FileRef(
                 path=str(out_path), sha256=_hash_file(out_path),
                 size_bytes=out_path.stat().st_size, role="output",
             )
         )
 
-    # Attach log file refs so the full stdout/stderr are tracked in the ledger.
     for name in _LOG_NAMES:
         path = run_dir / name
         if path.exists():
-            file_refs.append(
+            entry.files.append(
                 FileRef(
                     path=str(path), sha256=_hash_file(path),
                     size_bytes=path.stat().st_size, role="log",
                 )
             )
+
+    entry.exit_code = result.exit_code
+    entry.duration_seconds = result.duration_seconds
+    entry.run_status = "completed" if result.exit_code == 0 else "failed"
+    return entry
+
+
+def _submit_and_stage(
+    session: LedgerSession,
+    spec: ToolSpec,
+    input_files: dict[str, Path],
+    session_dir: Path,
+    params: dict | None,
+    parent_id: str | None,
+) -> tuple[LedgerEntry, Path, dict[str, float], set[str], DockerRunner]:
+    """Shared setup for submit_tool()/run_tool(): stage inputs, snapshot the
+    run dir BEFORE starting the container (so fast-finishing tools don't
+    race the pre-snapshot), then start the container.
+
+    Returns (entry, run_dir, pre_snapshot, staged_input_paths, runner) —
+    the latter two are needed by run_tool()'s caller to finalize the entry
+    once the container completes; submit_tool() discards them since
+    poll_tool() reconstructs an equivalent snapshot later from disk.
+    """
+    runner = DockerRunner()
+
+    run_id = uuid.uuid4().hex[:20]
+    run_dir = session_dir / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stage inputs (symlink for in-session sources, copy for external)
+    input_mapping = _stage_inputs(input_files, session_dir, run_dir)
+
+    # Snapshot BEFORE launching the container — must precede submit() so
+    # instant-finishing tools can't write outputs before we've recorded
+    # the "before" state.
+    pre_snapshot = _snapshot_dir(run_dir)
+    staged_input_paths = {str((run_dir / name).resolve()) for name in input_mapping.values()}
+
+    # Persist the pre-snapshot so poll_tool() can read it back across a
+    # process boundary instead of reconstructing from current mtimes
+    # (which is fragile if a tool modifies its inputs in-place).
+    (run_dir / "_pre_snapshot.json").write_text(json.dumps(pre_snapshot))
+
+    # Mount full session dir so relative symlinks to sibling run dirs resolve.
+    volumes = {str(session_dir): {"bind": "/sessions", "mode": "rw"}}
+    container_run_dir = f"/sessions/runs/{run_id}"
+
+    rendered_cmd = _render_command(
+        spec, input_mapping, params or {}, work_mount=container_run_dir
+    )
+    command = _to_shell_command(rendered_cmd)
+
+    container_id = runner.submit(
+        image=spec.container,
+        command=command,
+        volumes=volumes,
+        workdir=container_run_dir,
+    )
+
+    file_refs = _build_input_file_refs(input_mapping, run_dir)
 
     entry = LedgerEntry(
         id=run_id,
@@ -393,10 +427,131 @@ def run_tool(
         ),
         files=file_refs,
         params=params or {},
-        exit_code=result.exit_code,
-        duration_seconds=result.duration_seconds,
+        run_status="running",
+        container_id=container_id,
     )
     session.add(entry)
+    return entry, run_dir, pre_snapshot, staged_input_paths, runner
+
+
+def submit_tool(
+    session: LedgerSession,
+    spec: ToolSpec,
+    input_files: dict[str, Path],
+    session_dir: Path,
+    params: dict | None = None,
+    parent_id: str | None = None,
+) -> LedgerEntry:
+    """Start a tool run in the background and return immediately.
+
+    The returned entry has run_status="running" and container_id set.
+    Call poll_tool() later — from this process or a fresh one — to check
+    on and eventually finalize it.
+    """
+    entry, _run_dir, _pre_snapshot, _staged, _runner = _submit_and_stage(
+        session, spec, input_files, session_dir, params, parent_id
+    )
+    return entry
+
+
+def poll_tool(entry: LedgerEntry, session_dir: Path) -> LedgerEntry:
+    """Check a submitted tool run for completion. Idempotent.
+
+    If entry.run_status != "running", returns it unchanged. If the
+    container is still running, returns it unchanged. Once the container
+    reaches a terminal state, finalizes the entry (discovers outputs,
+    hashes files, sets exit_code/duration_seconds/run_status) in place and
+    returns it.
+
+    Safe to call from a different process than the one that submitted the
+    job: everything needed is reconstructed from the entry + session_dir.
+    """
+    if entry.run_status != "running" or not entry.container_id:
+        return entry
+
+    runner = DockerRunner()
+    result = runner.poll(entry.container_id)
+    if result is None:
+        return entry
+
+    run_dir = session_dir / "runs" / entry.id
+    spec = ToolSpec(execution=ExecutionSpec(**(entry.tool_spec_snapshot or {})))
+    input_mapping = entry.container.input_mapping if entry.container else {}
+    staged_input_paths = {
+        str((run_dir / name).resolve()) for name in input_mapping.values()
+    }
+
+    # Read the pre-snapshot persisted at submit time. Falls back to
+    # reconstructing from current mtimes for entries submitted before
+    # this file existed (backward compatibility).
+    snapshot_path = run_dir / "_pre_snapshot.json"
+    if snapshot_path.exists():
+        pre_snapshot = json.loads(snapshot_path.read_text())
+    else:
+        pre_snapshot = {
+            p: Path(p).stat().st_mtime for p in staged_input_paths if Path(p).exists()
+        }
+
+    return _finalize_entry(entry, spec, run_dir, result, pre_snapshot, staged_input_paths)
+
+
+def run_tool(
+    session: LedgerSession,
+    spec: ToolSpec,
+    input_files: dict[str, Path],
+    session_dir: Path,
+    params: dict | None = None,
+    parent_id: str | None = None,
+    timeout: int = 3600,
+    poll_interval: float = 0.5,
+) -> tuple[LedgerEntry, RunResult]:
+    """Execute a tool via Docker in an isolated per-run working directory,
+    blocking until it finishes.
+
+    Each run gets its own directory under sessions/<id>/runs/<entry_id>/,
+    mounted at /sessions/runs/<entry_id>. Inputs are staged as symlinks
+    (for in-session sources) or copies (for external sources). Outputs are
+    discovered via declared pattern globs.
+
+    Implemented as submit_tool() + a local poll loop (see DockerRunner.run
+    for why a single long HTTP wait is avoided). Signature/behavior are
+    unchanged for existing callers.
+
+    Args:
+        session: The active ledger session.
+        spec: Tool specification to execute.
+        input_files: Mapping of tool input names to resolved host paths.
+        session_dir: The session's root directory (for staging decisions).
+        params: Tool parameter overrides.
+        parent_id: Optional parent entry ID for DAG linkage.
+    """
+    entry, run_dir, pre_snapshot, staged_input_paths, runner = _submit_and_stage(
+        session, spec, input_files, session_dir, params, parent_id
+    )
+
+    start = time.monotonic()
+    result = runner.poll(entry.container_id)
+    while result is None:
+        if time.monotonic() - start > timeout:
+            try:
+                container = runner.client.containers.get(entry.container_id)
+                container.kill()
+            except Exception:
+                pass
+            try:
+                container = runner.client.containers.get(entry.container_id)
+                container.remove(force=True)
+            except Exception:
+                pass
+            entry.run_status = "failed"
+            entry.exit_code = -1
+            raise TimeoutError(
+                f"Container {entry.container_id} exceeded timeout of {timeout}s"
+            )
+        time.sleep(poll_interval)
+        result = runner.poll(entry.container_id)
+
+    _finalize_entry(entry, spec, run_dir, result, pre_snapshot, staged_input_paths)
     return entry, result
 
 
@@ -407,10 +562,15 @@ def run_script(
     container: str = "python:3.11-slim",
     input_files: dict[str, Path] | None = None,
     parent_id: str | None = None,
+    timeout: int = 3600,
+    poll_interval: float = 0.5,
 ) -> tuple[LedgerEntry, RunResult]:
-    """Run a custom script in a container using an isolated per-run directory."""
+    """Run a custom script in a container using an isolated per-run directory.
+
+    Uses the same submit/poll pattern as run_tool() for unified timeout
+    and container lifecycle handling.
+    """
     input_files = input_files or {}
-    runner = DockerRunner()
 
     # Generate run_id and create isolated run directory
     run_id = uuid.uuid4().hex[:20]
@@ -433,9 +593,10 @@ def run_script(
 
     # Snapshot empty run_dir for change detection
     pre_snapshot = _snapshot_dir(run_dir)
-
-    # Build staged input path set for fallback exclusion
     staged_input_paths = {str((run_dir / name).resolve()) for name in input_mapping.values()}
+
+    # Persist the pre-snapshot (same rationale as _submit_and_stage)
+    (run_dir / "_pre_snapshot.json").write_text(json.dumps(pre_snapshot))
 
     # Mount script dir (ro) + full session dir (rw so symlinks resolve)
     volumes = {
@@ -443,56 +604,23 @@ def run_script(
         str(session_dir): {"bind": "/sessions", "mode": "rw"},
     }
 
-    result = runner.run(
+    runner = DockerRunner()
+    container_id = runner.submit(
         image=container,
         command=["python", f"/scripts/{script_path.name}"],
         volumes=volumes,
         workdir=f"/sessions/runs/{run_id}",
     )
 
-    # Persist full stdout/stderr for later inspection.
-    log_paths = _persist_logs(run_dir, result)
-
-    # Capture script + input files + outputs
+    # Build entry with script + input file refs; _finalize_entry appends
+    # outputs, logs, exit_code, duration, and run_status.
     file_refs = [
         FileRef(
             path=str(script_path), sha256=_hash_file(script_path),
             size_bytes=script_path.stat().st_size, role="script",
         ),
     ]
-    for name, staged_basename in input_mapping.items():
-        staged_path = run_dir / staged_basename
-        if staged_path.exists():
-            # Staged path (basename matches input_mapping); hash follows symlink.
-            file_refs.append(
-                FileRef(
-                    path=str(staged_path), sha256=_hash_file(staged_path),
-                    size_bytes=staged_path.stat().st_size, role="input",
-                )
-            )
-
-    # Discover outputs
-    output_paths = _discover_outputs(
-        spec, run_dir, pre_snapshot, staged_input_paths, exclude_paths=log_paths
-    )
-    for out_path in output_paths:
-        file_refs.append(
-            FileRef(
-                path=str(out_path), sha256=_hash_file(out_path),
-                size_bytes=out_path.stat().st_size, role="output",
-            )
-        )
-
-    # Attach log file refs.
-    for name in _LOG_NAMES:
-        path = run_dir / name
-        if path.exists():
-            file_refs.append(
-                FileRef(
-                    path=str(path), sha256=_hash_file(path),
-                    size_bytes=path.stat().st_size, role="log",
-                )
-            )
+    file_refs.extend(_build_input_file_refs(input_mapping, run_dir))
 
     entry = LedgerEntry(
         id=run_id,
@@ -507,8 +635,33 @@ def run_script(
             input_mapping=input_mapping,
         ),
         files=file_refs,
-        exit_code=result.exit_code,
-        duration_seconds=result.duration_seconds,
+        run_status="running",
+        container_id=container_id,
     )
     session.add(entry)
+
+    # Poll loop — same pattern as run_tool
+    start = time.monotonic()
+    result = runner.poll(container_id)
+    while result is None:
+        if time.monotonic() - start > timeout:
+            try:
+                c = runner.client.containers.get(container_id)
+                c.kill()
+            except Exception:
+                pass
+            try:
+                c = runner.client.containers.get(container_id)
+                c.remove(force=True)
+            except Exception:
+                pass
+            entry.run_status = "failed"
+            entry.exit_code = -1
+            raise TimeoutError(
+                f"Container {container_id} exceeded timeout of {timeout}s"
+            )
+        time.sleep(poll_interval)
+        result = runner.poll(container_id)
+
+    _finalize_entry(entry, spec, run_dir, result, pre_snapshot, staged_input_paths)
     return entry, result

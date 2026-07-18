@@ -11,10 +11,12 @@ from rich.prompt import Prompt
 load_dotenv()  # Load .env into process environment before anything else
 
 import typer  # noqa: E402
+import docker.errors  # noqa: E402
 from rich.console import Console  # noqa: E402
+from rich.markup import escape as rich_escape  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-from bioledger.ledger.models import LedgerSession  # noqa: E402
+from bioledger.ledger.models import LedgerEntry, LedgerSession  # noqa: E402
 from bioledger.ledger.store import LedgerStore  # noqa: E402
 
 app = typer.Typer(name="bioledger", help="BioLedger: reproducible bio-analysis")
@@ -596,6 +598,7 @@ async def _analysis_chat(session_id: str) -> None:
     )
     console.print(
         "[dim]Type 'quit' to exit, 'review' to see entries, "
+        "'status' to check background jobs, "
         "'package' to build RO-Crate[/dim]\n"
     )
 
@@ -608,6 +611,24 @@ async def _analysis_chat(session_id: str) -> None:
 
     while True:
         try:
+            for entry in agent.poll_pending_jobs():
+                _print_job_completion(console, entry)
+                # Record the completion in chat history so the LLM knows
+                # about it when the user asks about job status later.
+                outputs = [Path(f.path).name for f in entry.files if f.role == "output"]
+                completion_msg = (
+                    f"Background job {entry.id} ({entry.tool_spec_name}) "
+                    f"finished with status: {entry.run_status}"
+                    f" (exit {entry.exit_code}). Outputs: {outputs}"
+                )
+                session.add_message("assistant", completion_msg, forge="analysisforge")
+                store.append_message(session.id, session.chat_messages[-1])
+        except (ConnectionError, OSError):
+            pass
+        except docker.errors.DockerException:
+            pass
+
+        try:
             user_input = console.input("[green]you>[/green] ").strip()
         except (EOFError, KeyboardInterrupt):
             break
@@ -616,6 +637,10 @@ async def _analysis_chat(session_id: str) -> None:
             continue
         if user_input.lower() == "quit":
             break
+
+        if user_input.lower() == "status":
+            _print_job_status(console, agent.session)
+            continue
 
         # Record user message
         session.add_message("user", user_input, forge="analysisforge")
@@ -639,7 +664,7 @@ async def _analysis_chat(session_id: str) -> None:
                 outputs = e.get("outputs", [])
                 output_names = [Path(p).name for p in outputs]
                 console.print(
-                    f"  {icon} [{entry_id}] {kind}: {label}  "
+                    f"  {icon} ({entry_id}) {kind}: {rich_escape(label)}  "
                     f"outputs={output_names}"
                 )
             continue
@@ -658,7 +683,7 @@ async def _analysis_chat(session_id: str) -> None:
                     outputs = e.get("outputs", [])
                     output_names = [Path(p).name for p in outputs]
                     console.print(
-                        f"  [{entry_id}] {tool_name} -> {output_names}"
+                        f"  ({entry_id}) {rich_escape(tool_name)} -> {output_names}"
                     )
 
             selection = console.input("[green]entries>[/green] ").strip()
@@ -762,8 +787,28 @@ async def _analysis_chat(session_id: str) -> None:
                     from bioledger.forges.analysisforge.executor import (
                         get_session_dir,
                     )
+                    from bioledger.toolspec.models import ExecutionMode
 
                     session_dir = get_session_dir(config.home_dir, session.id)
+
+                    # Peek the spec's suggested_mode to default the prompt
+                    # sensibly; the user can always override either way.
+                    try:
+                        suggested_mode = agent.get_tool_spec(
+                            tool_request.tool_name
+                        ).execution.suggested_mode
+                    except Exception:
+                        suggested_mode = ExecutionMode.BLOCKING
+
+                    run_in_background = typer.confirm(
+                        "Run in background?",
+                        default=(suggested_mode == ExecutionMode.ASYNC),
+                    )
+                    mode = (
+                        ExecutionMode.ASYNC
+                        if run_in_background
+                        else ExecutionMode.BLOCKING
+                    )
 
                     entry, run_result = await agent.run_tool_with_logging(
                         tool_request.tool_name,
@@ -771,9 +816,18 @@ async def _analysis_chat(session_id: str) -> None:
                         session_dir,
                         params=tool_request.params_as_dict(),
                         parent_id=parent_id,
+                        mode=mode,
                     )
 
-                    if run_result.exit_code == 0:
+                    if run_result is None:
+                        # Submitted as a background job — nothing to report yet.
+                        response = (
+                            f"Submitted {tool_request.tool_name} as job "
+                            f"{entry.id}. I'll let you know when it finishes "
+                            "(or type 'status' to check on it)."
+                        )
+                        console.print(f"\n[blue]assistant>[/blue] {response}")
+                    elif run_result.exit_code == 0:
                         outputs = [
                             Path(f.path).name
                             for f in entry.files
@@ -797,6 +851,7 @@ async def _analysis_chat(session_id: str) -> None:
                         )
                         if output_snippets:
                             response += "\n" + "\n".join(output_snippets)
+                        console.print(f"\n[blue]assistant>[/blue] {response}")
                     else:
                         snippet = _failure_snippet(run_result, Path(entry.files[0].path).parent)
                         fail_msg = (
@@ -815,13 +870,7 @@ async def _analysis_chat(session_id: str) -> None:
                             message_history=deps.message_history(),
                         )
                         response = fail_msg + "\n\n" + diagnosis.output.message
-
-                    display = (
-                        diagnosis.output.message
-                        if run_result.exit_code != 0
-                        else response
-                    )
-                    console.print(f"\n[blue]assistant>[/blue] {display}")
+                        console.print(f"\n[blue]assistant>[/blue] {diagnosis.output.message}")
                 else:
                     response = (
                         "OK, skipping tool run. What would you like to do "
@@ -859,13 +908,69 @@ def _failure_snippet(result: Any, run_dir: Path, max_chars: int = 3000) -> str:
         return "(no output captured)"
 
     if len(text) <= max_chars:
-        return text
+        return rich_escape(text)
 
     tail = text[-max_chars:]
     return (
         f"[showing last {max_chars} chars of {source} — "
-        f"full log: {run_dir / source}.log]\n{tail}"
+        f"full log: {run_dir / source}.log]\n{rich_escape(tail)}"
     )
+
+
+def _print_job_completion(console: Console, entry: LedgerEntry) -> None:
+    """Print a completion notice for a background job that just finished
+    (detected via the auto-poll at the top of the chat loop)."""
+    outputs = [Path(f.path).name for f in entry.files if f.role == "output"]
+    if entry.run_status == "completed":
+        console.print(
+            f"\n[green]Job finished:[/green] {entry.id} ({entry.tool_spec_name})"
+            f"\n  Outputs: {outputs}"
+        )
+        return
+
+    console.print(
+        f"\n[red]Job {entry.run_status} (exit {entry.exit_code}):[/red] "
+        f"{entry.id} ({entry.tool_spec_name})"
+    )
+    stderr_path = next(
+        (f.path for f in entry.files if f.role == "log" and f.path.endswith("stderr.log")),
+        None,
+    )
+    if stderr_path and Path(stderr_path).exists():
+        text = Path(stderr_path).read_text()
+        if text.strip():
+            snippet = text[-3000:] if len(text) > 3000 else text
+            console.print(
+                f"[showing last {len(snippet)} chars of stderr — "
+                f"full log: {stderr_path}]\n{rich_escape(snippet)}"
+            )
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format elapsed seconds into a human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    hours = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    return f"{hours}h {mins}m"
+
+
+def _print_job_status(console: Console, session: LedgerSession) -> None:
+    """List currently running background jobs with elapsed time."""
+    from datetime import datetime, timezone
+
+    running = [e for e in session.entries if e.run_status == "running"]
+    if not running:
+        console.print("[dim]No background jobs running.[/dim]")
+        return
+    now = datetime.now(timezone.utc)
+    for e in running:
+        elapsed = (now - e.timestamp).total_seconds()
+        # Note: entry IDs are printed in parens, not brackets — Rich
+        # interprets "[...]" as markup and would silently swallow them.
+        console.print(f"  ({e.id}) {e.tool_spec_name} — running for {_format_elapsed(elapsed)}")
 
 
 def _resolve_inputs(
