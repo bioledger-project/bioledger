@@ -349,11 +349,14 @@ class LedgerStore:
                 session.updated.isoformat(),
             ),
         )
-        # Append entries not yet persisted (INSERT OR IGNORE by PK)
+        # Upsert entries (INSERT OR IGNORE would silently skip entries
+        # that already exist, losing updates like run_status changes and
+        # newly discovered outputs after async job completion).
         for entry in session.entries:
             self._conn.execute(
-                "INSERT OR IGNORE INTO entries (id, session_id, kind, timestamp, data) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO entries (id, session_id, kind, timestamp, data) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET data=excluded.data",
                 (
                     entry.id,
                     session.id,

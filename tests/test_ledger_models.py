@@ -170,3 +170,42 @@ class TestAsyncRunStatus:
         for status in ("pending", "running", "completed", "failed", "unknown"):
             entry = LedgerEntry(kind=EntryKind.TOOL_RUN, run_status=status)
             assert entry.run_status == status
+
+
+def test_save_session_updates_existing_entry(tmp_path):
+    """Regression: save_session must UPDATE entries that already exist,
+    not silently skip them. Previously used INSERT OR IGNORE which meant
+    finalized async jobs (run_status changed from 'running' to 'completed',
+    outputs added) were never persisted to disk."""
+    from bioledger.ledger.store import LedgerStore
+
+    store = LedgerStore(db_path=tmp_path / "test.db")
+    session = LedgerSession(name="test")
+    entry = LedgerEntry(
+        kind=EntryKind.TOOL_RUN,
+        tool_spec_name="bwa-mem2-index",
+        run_status="running",
+        container_id="abc123",
+    )
+    session.add(entry)
+    store.save_session(session)
+
+    # Simulate poll_tool finalizing the entry in memory
+    entry.run_status = "completed"
+    entry.exit_code = 0
+    entry.files.append(
+        FileRef(path="/tmp/output.txt", sha256="abc", size_bytes=42, role="output")
+    )
+    store.save_session(session)
+
+    # Load from a fresh store instance to verify the update was persisted
+    store2 = LedgerStore(db_path=tmp_path / "test.db")
+    loaded = store2.load_session(session.id)
+    assert loaded is not None
+    loaded_entry = next(e for e in loaded.entries if e.id == entry.id)
+    assert loaded_entry.run_status == "completed"
+    assert loaded_entry.exit_code == 0
+    assert len(loaded_entry.files) == 1
+    assert loaded_entry.files[0].role == "output"
+    store.close()
+    store2.close()
