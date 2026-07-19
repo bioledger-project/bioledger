@@ -116,7 +116,7 @@ BIOLEDGER_DEFAULT_MODEL=google-gla:gemini-2.5-flash
 
 ### Docker (optional)
 
-Tool execution runs inside Docker containers. Install [Docker](https://docs.docker.com/get-docker/) if you plan to run bioinformatics tools through BioLedger.
+Tool execution runs inside Docker containers. Install [Docker](https://docs.docker.com/get-docker/) if you plan to run bioinformatics tools through BioLedger. Conda support is planned as an alternative runtime for HPC and shared-cluster environments where Docker isn't available.
 
 ## Installation
 
