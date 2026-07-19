@@ -12,6 +12,7 @@ def build_rocrate(
     session: LedgerSession,
     output_dir: Path,
     entry_ids: list[str] | None = None,
+    include_running: bool = False,
 ) -> Path:
     """Package a ledger session (or subset) as an RO-Crate.
 
@@ -20,6 +21,8 @@ def build_rocrate(
         output_dir: Where to write crate files
         entry_ids: If provided, only include these entries (user-selected subset).
                    If None, include all entries.
+        include_running: If True, include entries with run_status "running"
+                         in the Nextflow workflow.
 
     The RO-Crate always includes:
     - Data files consumed/produced by selected entries
@@ -74,7 +77,9 @@ def build_rocrate(
                 to_nextflow_from_entries,
             )
 
-            nf_content = to_nextflow_from_entries(tool_entries)
+            nf_content = to_nextflow_from_entries(
+                tool_entries, include_running=include_running
+            )
             nf_path = scratch / "workflow.nf"
             nf_path.write_text(nf_content)
             crate.add_workflow(

@@ -1169,6 +1169,9 @@ def crystallize(
     entry_ids: list[str] = typer.Option(
         None, "--entry", "-e", help="Specific entry IDs to include (default: all)"
     ),
+    include_running: bool = typer.Option(
+        False, "--include-running", help="Include jobs still running"
+    ),
 ) -> None:
     """Convert a session (or selected entries) into a reproducible workflow."""
     store = LedgerStore()
@@ -1180,11 +1183,13 @@ def crystallize(
         )
 
         entries = [e for e in session.entries if e.id in set(entry_ids)]
-        console.print(to_nextflow_from_entries(entries))
+        console.print(to_nextflow_from_entries(
+            entries, include_running=include_running
+        ))
     elif format == "nextflow":
         from bioledger.forges.analysisforge.crystallize import to_nextflow
 
-        console.print(to_nextflow(session))
+        console.print(to_nextflow(session, include_running=include_running))
     elif format == "galaxy":
         from bioledger.forges.analysisforge.crystallize import to_galaxy_workflow
 
@@ -1203,6 +1208,9 @@ def package(
     output_dir: Path = typer.Option(
         None, help="Output directory (default: ~/.bioledger/crates/<session_id>)"
     ),
+    include_running: bool = typer.Option(
+        False, "--include-running", help="Include jobs still running"
+    ),
 ) -> None:
     """Package a session (or selected entries) into an RO-Crate."""
     from bioledger.config import BioLedgerConfig
@@ -1215,7 +1223,10 @@ def package(
     if output_dir is None:
         output_dir = config.home_dir / "crates" / session_id
 
-    crate_dir = build_rocrate(session, output_dir, entry_ids=entry_ids)
+    crate_dir = build_rocrate(
+        session, output_dir, entry_ids=entry_ids,
+        include_running=include_running,
+    )
     console.print(f"[green]RO-Crate written to {crate_dir}[/green]")
     console.print(
         f"  Entries: {len(entry_ids) if entry_ids else len(session.entries)}"
