@@ -49,6 +49,89 @@ def _topological_order(
     return list(reversed(order))
 
 
+def _build_output_source_map(
+    entries: list[LedgerEntry],
+) -> dict[str, tuple[str, str]]:
+    """Build a map from output filename → (entry_id, emit_name).
+
+    If multiple entries produce the same filename, the first one in the
+    list wins (entries are typically in execution order).
+
+    Files that appear as both input and output in the same entry with the
+    SAME sha256 are excluded — they are staged inputs that leaked into the
+    output list (the tool didn't produce them, they were just staged there).
+
+    However, if the sha256 DIFFERS (e.g. bgzip re-compresses a .fna.gz to
+    a .fna.gz with different content), the output is legitimate and is
+    included so downstream tools can chain to it.
+    """
+    source_map: dict[str, tuple[str, str]] = {}
+    for entry in entries:
+        # Map basename → sha256 for inputs, to detect staged-input leaks
+        input_sha: dict[str, str] = {}
+        for f in entry.files:
+            if f.role == "input":
+                input_sha[Path(f.path).name] = f.sha256
+        output_files = _output_filenames(entry)
+        for idx, filename in enumerate(output_files):
+            # Skip staged inputs that leaked into outputs: same basename
+            # AND same sha256 means the tool didn't produce it.
+            if filename in input_sha:
+                output_sha = next(
+                    (f.sha256 for f in entry.files
+                     if f.role == "output" and Path(f.path).name == filename),
+                    "",
+                )
+                if output_sha == input_sha[filename]:
+                    continue
+            if filename not in source_map:
+                source_map[filename] = (entry.id, f"out{idx}")
+    return source_map
+
+
+def _build_dependency_graph(
+    entries: list[LedgerEntry],
+    source_map: dict[str, tuple[str, str]],
+) -> dict[str, set[str]]:
+    """Build a dependency graph based on file-level input/output matching.
+
+    Entry A depends on entry B if A consumes a file that B produces.
+    This replaces the single parent_id link with multi-source dependencies.
+    """
+    deps: dict[str, set[str]] = {e.id: set() for e in entries}
+    for entry in entries:
+        input_map = _input_name_to_filename(entry)
+        for filename in input_map.values():
+            if filename in source_map:
+                producer_id, _ = source_map[filename]
+                if producer_id != entry.id:
+                    deps[entry.id].add(producer_id)
+    return deps
+
+
+def _topological_order_from_deps(
+    entries: list[LedgerEntry],
+    deps: dict[str, set[str]],
+) -> list[LedgerEntry]:
+    """Topological sort respecting file-level dependencies."""
+    entry_by_id = {e.id: e for e in entries}
+    visited: set[str] = set()
+    order: list[LedgerEntry] = []
+
+    def dfs(eid: str) -> None:
+        if eid in visited:
+            return
+        visited.add(eid)
+        for dep_id in deps.get(eid, set()):
+            dfs(dep_id)
+        order.append(entry_by_id[eid])
+
+    for entry in entries:
+        dfs(entry.id)
+
+    return order
+
+
 def _proc_name(entry: LedgerEntry, index: int) -> str:
     """Generate a Nextflow process name from a ledger entry."""
     base = entry.tool_spec_name or (
@@ -131,17 +214,21 @@ def _make_nf_process(proc: str, entry: LedgerEntry) -> str:
         input_decls = [f"    path {name}" for name in input_names]
 
     # Output declarations: prefer concrete filenames from the recorded run;
-    # fall back to tool spec patterns.
+    # fall back to tool spec patterns.  Each output gets an emit: name so
+    # the workflow block can reference individual outputs by name.
     output_files = _output_filenames(entry)
     if output_files:
-        output_decls = [f"    path '{f}'" for f in output_files]
+        output_decls = [
+            f"    path '{f}', emit: out{idx}"
+            for idx, f in enumerate(output_files)
+        ]
     else:
         output_decls = []
-        for out_def in (spec.get("outputs") or {}).values():
+        for idx, out_def in enumerate((spec.get("outputs") or {}).values()):
             pattern = out_def.get("pattern") or f"*.{out_def.get('format', 'out')}"
-            output_decls.append(f"    path '{pattern}'")
+            output_decls.append(f"    path '{pattern}', emit: out{idx}")
         if not output_decls:
-            output_decls = ["    path '*'"]
+            output_decls = ["    path '*', emit: out0"]
 
     script = _render_script_for_nextflow(entry, input_names)
 
@@ -163,43 +250,18 @@ process {proc} {{
 }}"""
 
 
-def _crate_input_channels(entry: LedgerEntry) -> list[str]:
-    """Build Nextflow channel expressions for an entry's inputs, referencing
-    their location within the packaged RO-Crate.
-
-    The crate layout places each entry's files at ``{entry_id[:8]}/{filename}``
-    relative to the crate root (where ``workflow.nf`` lives).
-    """
-    spec_inputs = (entry.tool_spec_snapshot or {}).get("inputs") or {}
-    input_map = _input_name_to_filename(entry)
-    ordered_names = list(spec_inputs.keys()) or list(input_map.keys())
-    crate_dir = entry.id[:8]
-    channels: list[str] = []
-    for name in ordered_names:
-        filename = input_map.get(name)
-        if filename:
-            channels.append(
-                f'Channel.fromPath("${{projectDir}}/{crate_dir}/{filename}")'
-            )
-        else:
-            channels.append("Channel.fromPath(params.input)")
-    if not channels:
-        # No declared inputs — fall back to a single generic channel so the
-        # process can still be wired.
-        channels.append("Channel.fromPath(params.input)")
-    return channels
-
-
 def _render_workflow(ordered: list[LedgerEntry]) -> str:
     """Shared renderer: emit process blocks + workflow block for ordered entries.
 
-    Root entries (parent not in selection) reference their specific input files
-    from within the packaged RO-Crate. Chained entries consume their parent's
-    output channel.
+    For each entry's inputs, the renderer looks up which prior entry produced
+    that file (via the output source map) and wires the specific named output
+    channel.  Inputs not found in any prior entry's outputs are treated as root
+    inputs and wired to crate channels (``${projectDir}/{entry_id[:8]}/{file}``).
     """
     if not ordered:
         return "// Empty workflow — no tool or script runs in selection"
 
+    source_map = _build_output_source_map(ordered)
     entry_to_proc: dict[str, str] = {}
     processes: list[str] = []
     workflow_lines: list[str] = ["workflow {"]
@@ -209,39 +271,94 @@ def _render_workflow(ordered: list[LedgerEntry]) -> str:
         entry_to_proc[entry.id] = proc
         processes.append(_make_nf_process(proc, entry))
 
-        if entry.parent_id and entry.parent_id in entry_to_proc:
-            parent_proc = entry_to_proc[entry.parent_id]
-            workflow_lines.append(f"    {proc}({parent_proc}.out)")
-        else:
-            # Root entry: wire to its specific input files from the crate
-            channels = _crate_input_channels(entry)
-            workflow_lines.append(f"    {proc}({', '.join(channels)})")
+        # Wire each input to its correct source
+        spec_inputs = (entry.tool_spec_snapshot or {}).get("inputs") or {}
+        input_map = _input_name_to_filename(entry)
+        input_names = list(spec_inputs.keys()) or list(input_map.keys())
+
+        channels: list[str] = []
+        for name in input_names:
+            filename = input_map.get(name)
+            if filename and filename in source_map:
+                producer_id, emit_name = source_map[filename]
+                # Skip self-references: an entry's input may share a basename
+                # with its own output (e.g. bgzip input and output are both
+                # .fna.gz). Wire to crate channel instead.
+                if producer_id != entry.id and producer_id in entry_to_proc:
+                    producer_proc = entry_to_proc[producer_id]
+                    channels.append(f"{producer_proc}.out.{emit_name}")
+                    continue
+            # Root input: wire to crate channel
+            if filename:
+                crate_dir = entry.id[:8]
+                channels.append(
+                    f'Channel.fromPath("${{projectDir}}/{crate_dir}/{filename}")'
+                )
+            else:
+                channels.append("Channel.fromPath(params.input)")
+
+        if not channels:
+            channels.append("Channel.fromPath(params.input)")
+
+        workflow_lines.append(f"    {proc}({', '.join(channels)})")
 
     workflow_lines.append("}")
     return "\n".join(processes) + "\n\n" + "\n".join(workflow_lines)
 
 
-def to_nextflow(session: LedgerSession) -> str:
-    """Convert a ledger session into a DAG-aware Nextflow DSL2 workflow."""
-    children, _by_id = _build_dag(session)
-    ordered = _topological_order(children)
+def to_nextflow(
+    session: LedgerSession,
+    include_running: bool = False,
+) -> str:
+    """Convert a ledger session into a DAG-aware Nextflow DSL2 workflow.
+
+    Args:
+        session: The session to crystallize.
+        include_running: If True, also include entries with run_status
+            "running" (e.g. jobs still executing). Their outputs may not
+            be known yet, so downstream wiring may be incomplete.
+    """
+    valid_statuses = ("completed", "failed")
+    if include_running:
+        valid_statuses = ("completed", "failed", "running")
+    tool_entries = [
+        e for e in session.entries
+        if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
+        and e.run_status in valid_statuses
+    ]
+    source_map = _build_output_source_map(tool_entries)
+    deps = _build_dependency_graph(tool_entries, source_map)
+    ordered = _topological_order_from_deps(tool_entries, deps)
     return _render_workflow(ordered)
 
 
-def to_nextflow_from_entries(entries: list[LedgerEntry]) -> str:
+def to_nextflow_from_entries(
+    entries: list[LedgerEntry],
+    include_running: bool = False,
+) -> str:
     """Generate a Nextflow DSL2 workflow from a list of entries.
 
-    Used by build_rocrate when packaging selected entries. Entries whose
-    parent_id is not in the subset are treated as roots — their inputs are
-    read from the packaged crate layout. Multiple roots represent independent
-    parallel branches, which is a valid Nextflow pattern.
+    Used by build_rocrate when packaging selected entries. Inputs are wired
+    by matching filenames to prior entries' outputs; inputs not found in any
+    prior entry's outputs are treated as root inputs from the crate layout.
+
+    Args:
+        entries: Entries to include in the workflow.
+        include_running: If True, also include entries with run_status
+            "running".
     """
+    valid_statuses = ("completed", "failed")
+    if include_running:
+        valid_statuses = ("completed", "failed", "running")
     tool_entries = [
         e for e in entries
         if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
-        and e.run_status in ("completed", "failed")
+        and e.run_status in valid_statuses
     ]
-    return _render_workflow(tool_entries)
+    source_map = _build_output_source_map(tool_entries)
+    deps = _build_dependency_graph(tool_entries, source_map)
+    ordered = _topological_order_from_deps(tool_entries, deps)
+    return _render_workflow(ordered)
 
 
 def to_galaxy_workflow(session: LedgerSession) -> dict:
