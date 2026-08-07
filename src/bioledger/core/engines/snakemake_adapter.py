@@ -71,6 +71,10 @@ def _generate_snakefile(
 ) -> list[str]:
     """Generate a parameterized Snakefile for fan-out.
 
+    The Snakefile uses ``config`` (from config.yaml written at submit time)
+    for all path values — no hardcoded paths in the generated file.
+    ``submit()`` binds actual values via config.yaml.
+
     Returns the list of rule names (step_inventory).
     """
     spec_inputs = getattr(spec, "inputs", {}) or {}
@@ -98,13 +102,14 @@ def _generate_snakefile(
         first = collection_inputs[0]
         kind, pattern = _parse_collection_value(input_mapping[first])
         if kind == "glob":
-            # Extract a stem pattern from the glob
             scatter_wildcard = "sample"
 
-    # Build expand() output patterns
+    # Build expand() output patterns — parameterized via config
     output_patterns: list[str] = []
     for out_name, out_def in spec_outputs.items():
-        pattern = getattr(out_def, "pattern", "") or f"{{scatter_wildcard}}.{out_name}"
+        pattern = getattr(out_def, "pattern", "") or (
+            "{" + scatter_wildcard + "}." + out_name
+        )
         # Replace * with {wildcard} for expand()
         if "*" in pattern:
             pattern = pattern.replace("*", "{" + scatter_wildcard + "}")
@@ -115,13 +120,17 @@ def _generate_snakefile(
     if not output_patterns:
         output_patterns = ["{item}.out"]
 
-    # Build input declarations for the rule
+    # Build input declarations for the rule — all paths via config
     input_lines: list[str] = []
     for name in collection_inputs:
-        input_lines.append(f'    {name}=expand("input/{{{scatter_wildcard}}}", {scatter_wildcard}=GLOB_PATTERN),')
+        input_lines.append(
+            f'    {name}=expand('
+            f'"input/{{{scatter_wildcard}}}", '
+            f'{scatter_wildcard}=glob(config["{name}_pattern"])),'
+        )
     for name in single_inputs:
         if name in input_mapping:
-            input_lines.append(f'    {name}="{input_mapping[name]}",')
+            input_lines.append(f'    {name}=config["{name}"],')
 
     # Build the Snakefile content
     container_directive = ""
@@ -131,7 +140,7 @@ def _generate_snakefile(
     # Parameterize with config values that submit() will bind
     params_lines: list[str] = []
     for name in single_inputs:
-        params_lines.append(f'    {name}=config.get("{name}", ""),')
+        params_lines.append(f'    {name}=config["{name}"],')
 
     rule_name = tool_name.replace("-", "_")
 
@@ -145,7 +154,10 @@ def _generate_snakefile(
         "",
         "rule all:",
         "    input:",
-        '        expand("' + output_patterns[0] + '", ' + scatter_wildcard + '=GLOB_PATTERN),',
+        '        expand("' + output_patterns[0] + '", '
+        + scatter_wildcard + '=glob(config["'
+        + collection_inputs[0] + '_pattern"])),' if collection_inputs
+        else '        "' + output_patterns[0] + '",',
         "",
         "rule " + rule_name + ":",
         "    input:",
@@ -173,7 +185,7 @@ def _generate_snakefile(
 
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_path.write_text("\n".join(lines))
-    return [rule_name]
+    return [rule_name], collection_inputs
 
 
 class SnakemakeAdapter:
@@ -192,13 +204,23 @@ class SnakemakeAdapter:
             return self._config.executable
         return _check_snakemake_available()
 
-    def _build_config_yaml(self, input_mapping: dict[str, str], params: dict[str, Any]) -> str:
-        """Build a config.yaml for snakemake from input_mapping + params."""
+    def _build_config_yaml(
+        self,
+        input_mapping: dict[str, str],
+        params: dict[str, Any],
+        collection_inputs: list[str] | None = None,
+    ) -> str:
+        """Build a config.yaml for snakemake from input_mapping + params.
+
+        Collection inputs get a ``<name>_pattern`` key with the glob pattern.
+        Single inputs get a ``<name>`` key with the path.
+        """
+        coll = set(collection_inputs or [])
         lines: list[str] = []
         for k, v in {**input_mapping, **params}.items():
-            # Escape quotes in string values
+            key = f"{k}_pattern" if k in coll else k
             v_str = str(v).replace('"', '\\"')
-            lines.append(f'{k}: "{v_str}"')
+            lines.append(f'{key}: "{v_str}"')
         return "\n".join(lines) + "\n"
 
     def submit_spec(
@@ -238,7 +260,7 @@ class SnakemakeAdapter:
         import tempfile
         artifact_path = Path(tempfile.gettempdir()) / f"bioledger_snakefile_{int(time.time())}.smk"
 
-        step_inventory = _generate_snakefile(
+        step_inventory, collection_inputs = _generate_snakefile(
             spec, input_mapping, container_image, artifact_path
         )
 
@@ -258,7 +280,10 @@ class SnakemakeAdapter:
             container_image=container_image,
             input_mapping=input_mapping,
             output_patterns=output_patterns,
-            metadata={"extra_args": extra_args or []},
+            metadata={
+                "extra_args": extra_args or [],
+                "collection_inputs": collection_inputs,
+            },
         )
 
     def submit(
@@ -282,7 +307,10 @@ class SnakemakeAdapter:
 
         # Write config.yaml with bound values
         config_path = work_dir / "config.yaml"
-        config_path.write_text(self._build_config_yaml(input_mapping, params))
+        collection_inputs = handle.metadata.get("collection_inputs", [])
+        config_path.write_text(
+            self._build_config_yaml(input_mapping, params, collection_inputs)
+        )
 
         # Build the snakemake command
         cmd = [

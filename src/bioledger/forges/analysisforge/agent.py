@@ -12,6 +12,7 @@ from pydantic_ai import RunContext
 
 from bioledger.config import BioLedgerConfig
 from bioledger.core.llm.agents import ForgeDeps, make_agent
+from bioledger.core.engines.protocol import WorkflowHandle
 from bioledger.forges.analysisforge.executor import (
     get_session_dir,
     poll_tool,
@@ -25,7 +26,13 @@ from bioledger.forges.isaforge.dataset import (
     load_dataset_from_isatab,
 )
 from bioledger.forges.isaforge.download import download_remote_files
-from bioledger.ledger.models import EntryKind, FileRef, LedgerEntry, LedgerSession
+from bioledger.ledger.models import (
+    ContainerInfo,
+    EntryKind,
+    FileRef,
+    LedgerEntry,
+    LedgerSession,
+)
 from bioledger.ledger.store import LedgerStore
 from bioledger.toolspec.models import ExecutionMode
 from bioledger.toolspec.store import ToolStore
@@ -715,3 +722,83 @@ class AnalysisForgeAgent:
                 statuses.append(f"{engine} (not installed)")
 
         return ", ".join(statuses)
+
+    def submit_fanout(
+        self,
+        tool_name: str,
+        input_mapping: dict[str, str],
+        params: dict[str, Any],
+        engine: str | None = None,
+        parent_id: str | None = None,
+    ) -> tuple[LedgerEntry, WorkflowHandle | None]:
+        """Submit a fan-out workflow run via a workflow engine.
+
+        Agent-driven fan-out path:
+        1. Resolve the engine (explicit or auto-detect).
+        2. Load the toolspec, dispatch to the engine adapter.
+        3. Call generate() to produce a parameterized workflow.
+        4. Create a LedgerEntry (run_status="running", executor=engine).
+        5. Call submit() to bind values and launch.
+        6. Return (entry, workflow_handle) for polling.
+
+        The caller (agent/CLI) should show the planned fan-out to the
+        user for confirmation before calling this method.
+
+        Raises RuntimeError if no engine is available.
+        Raises NotImplementedError if the engine adapter is not implemented.
+        """
+        from bioledger.core.engines.dispatch import (
+            _get_engine_adapter,
+            resolve_engine_for_fanout,
+        )
+
+        session_dir = get_session_dir(
+            self.config.home_dir, self.session.id
+        )
+
+        # Resolve engine
+        engines_cfg = self.config.engines if self.config else None
+        resolved_engine = resolve_engine_for_fanout(engines_cfg, engine)
+
+        # Load spec and get adapter
+        spec = self.get_tool_spec(tool_name)
+        adapter = _get_engine_adapter(resolved_engine, engines_cfg)
+
+        # Generate the parameterized workflow
+        handle = adapter.generate(
+            spec=spec.execution,
+            input_mapping=input_mapping,
+        )
+
+        # Create LedgerEntry for the fan-out run
+        entry = LedgerEntry(
+            kind=EntryKind.TOOL_RUN,
+            tool_spec_name=tool_name,
+            tool_spec_snapshot=spec.execution.model_dump(),
+            container=ContainerInfo(
+                image=handle.container_image or spec.execution.container,
+                command=[],
+                input_mapping=input_mapping,
+            ),
+            params=params,
+            parent_id=parent_id,
+            run_status="running",
+            run_handle_id="",  # set after submit
+            executor=resolved_engine,
+            notes=f"Fan-out via {resolved_engine}: {handle.step_inventory}",
+        )
+        self.session.add(entry)
+
+        # Submit the workflow
+        run_handle = adapter.submit(
+            handle=handle,
+            input_mapping=input_mapping,
+            params=params,
+            work_dir=session_dir / f"fanout_{entry.id}",
+        )
+
+        # Update entry with run handle
+        entry.run_handle_id = run_handle.run_id
+        self.store.save_session(self.session)
+
+        return entry, handle
