@@ -80,7 +80,7 @@ class TestModeResolution:
 
         assert result is None
         assert entry.run_status == "running"
-        assert entry.container_id == "container-123"
+        assert entry.run_handle_id == "container-123"
 
     async def test_defers_to_spec_suggested_mode_when_none(self, agent, tmp_path):
         spec = _make_spec("async-tool", ExecutionMode.ASYNC)

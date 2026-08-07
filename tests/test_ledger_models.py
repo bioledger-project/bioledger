@@ -126,48 +126,48 @@ def test_ledger_session_serialization():
 
 
 class TestAsyncRunStatus:
-    """Tests for run_status/container_id (async tool execution tracking)."""
+    """Tests for run_status/run_handle_id (async tool execution tracking)."""
 
     def test_default_run_status_is_completed(self):
         """Default preserves the meaning of pre-existing entries with no
         migration needed — a bare LedgerEntry() is assumed already done."""
         entry = LedgerEntry(kind=EntryKind.TOOL_RUN)
         assert entry.run_status == "completed"
-        assert entry.container_id is None
+        assert entry.run_handle_id is None
 
-    def test_running_entry_with_container_id(self):
+    def test_running_entry_with_run_handle_id(self):
         entry = LedgerEntry(
             kind=EntryKind.TOOL_RUN,
             run_status="running",
-            container_id="abc123def456",
+            run_handle_id="abc123def456",
         )
         assert entry.run_status == "running"
-        assert entry.container_id == "abc123def456"
+        assert entry.run_handle_id == "abc123def456"
         assert entry.exit_code is None
 
     def test_run_status_round_trip_serialization(self):
         entry = LedgerEntry(
             kind=EntryKind.TOOL_RUN,
             run_status="running",
-            container_id="deadbeef",
+            run_handle_id="deadbeef",
         )
         loaded = LedgerEntry.model_validate_json(entry.model_dump_json())
         assert loaded.run_status == "running"
-        assert loaded.container_id == "deadbeef"
+        assert loaded.run_handle_id == "deadbeef"
 
     def test_backward_compat_load_without_new_fields(self):
-        """Entries persisted before run_status/container_id existed must
+        """Entries persisted before run_status/run_handle_id existed must
         still load, defaulting run_status to 'completed'."""
         old_style_json = (
             '{"kind": "tool_run", "tool_spec_name": "bwa", "exit_code": 0}'
         )
         loaded = LedgerEntry.model_validate_json(old_style_json)
         assert loaded.run_status == "completed"
-        assert loaded.container_id is None
+        assert loaded.run_handle_id is None
         assert loaded.exit_code == 0
 
     def test_all_run_status_values_accepted(self):
-        for status in ("pending", "running", "completed", "failed", "unknown"):
+        for status in ("pending", "queued", "running", "completed", "failed", "unknown"):
             entry = LedgerEntry(kind=EntryKind.TOOL_RUN, run_status=status)
             assert entry.run_status == status
 
@@ -185,7 +185,7 @@ def test_save_session_updates_existing_entry(tmp_path):
         kind=EntryKind.TOOL_RUN,
         tool_spec_name="bwa-mem2-index",
         run_status="running",
-        container_id="abc123",
+        run_handle_id="abc123",
     )
     session.add(entry)
     store.save_session(session)

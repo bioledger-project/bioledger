@@ -256,7 +256,7 @@ class TestAsyncSubmitPoll:
             params={},
         )
         assert entry.run_status == "running"
-        assert entry.container_id
+        assert entry.run_handle_id
 
         import time
 

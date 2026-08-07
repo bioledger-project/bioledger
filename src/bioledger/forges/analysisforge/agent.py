@@ -452,7 +452,7 @@ class AnalysisForgeAgent:
         mode: None defers to the tool spec's `suggested_mode`. When the
         effective mode is ASYNC, submits the container and returns
         immediately with (entry, None) — the entry has run_status="running"
-        and container_id set. Call poll_pending_jobs() later to finalize it.
+        and run_handle_id set. Call poll_pending_jobs() later to finalize it.
         When BLOCKING, behaves as before: (entry, RunResult).
         """
         spec = self.get_tool_spec(tool_name)

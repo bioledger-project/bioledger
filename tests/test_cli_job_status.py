@@ -69,7 +69,7 @@ def test_print_job_status_lists_running_jobs():
         kind=EntryKind.TOOL_RUN,
         tool_spec_name="gatk-haplotypecaller",
         run_status="running",
-        container_id="abc123",
+        run_handle_id="abc123",
         timestamp=datetime.now(timezone.utc) - timedelta(seconds=42),
     )
     done_entry = LedgerEntry(

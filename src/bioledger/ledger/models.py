@@ -77,16 +77,21 @@ class LedgerEntry(BaseModel):
     duration_seconds: float | None = None
     # Async tool-run tracking. Default "completed" preserves the meaning of
     # all pre-existing entries (no migration needed — entries are stored as
-    # JSON blobs). "running" + container_id set means the container was
-    # submitted but not yet polled to completion; "unknown" covers the case
-    # where the container/job was lost (e.g. daemon restart, externally
-    # removed). This 5-value set is a superset shaped to also accommodate
-    # future HPC scheduler states (Slurm/LSF PENDING/RUNNING/COMPLETED/
-    # FAILED/CANCELLED) without redesign.
-    run_status: Literal["pending", "running", "completed", "failed", "unknown"] = (
-        "completed"
-    )
-    container_id: str | None = None  # set while run_status == "running"
+    # JSON blobs). "running" + run_handle_id set means the job was
+    # submitted but not yet polled to completion; "queued" covers workflow-
+    # engine queue states (e.g. Snakemake/Nextflow dry-run pending);
+    # "unknown" covers the case where the job was lost (e.g. daemon restart,
+    # externally removed). This 6-value set is a superset shaped to also
+    # accommodate future HPC scheduler states (Slurm/LSF PENDING/RUNNING/
+    # COMPLETED/FAILED/CANCELLED) without redesign.
+    run_status: Literal[
+        "pending", "queued", "running", "completed", "failed", "unknown"
+    ] = "completed"
+    run_handle_id: str | None = None  # set while run_status in ("queued", "running")
+    # Which executor ran this entry. "docker" for single-tool Docker runs
+    # (the existing path), "conda" for conda-based runs, or an engine name
+    # ("nextflow"/"snakemake"/"galaxy") for workflow-engine submissions.
+    executor: str = "docker"
 
 
 class LedgerSession(BaseModel):

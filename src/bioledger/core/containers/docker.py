@@ -42,7 +42,7 @@ class DockerRunner:
     Async mode is essential for long-running tools (hours), since a single
     giant HTTP `wait()` call is fragile to read-timeouts well before the
     logical deadline — polling in short bounded increments is far more
-    robust and lets callers persist a `container_id` and reconnect later
+    robust and lets callers persist a `run_handle_id` and reconnect later
     (e.g. across a CLI process restart), since the container itself keeps
     running against the Docker daemon independent of our process.
     """

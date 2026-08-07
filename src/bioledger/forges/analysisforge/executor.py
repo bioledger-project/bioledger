@@ -428,7 +428,7 @@ def _submit_and_stage(
         files=file_refs,
         params=params or {},
         run_status="running",
-        container_id=container_id,
+        run_handle_id=container_id,
     )
     session.add(entry)
     return entry, run_dir, pre_snapshot, staged_input_paths, runner
@@ -444,7 +444,7 @@ def submit_tool(
 ) -> LedgerEntry:
     """Start a tool run in the background and return immediately.
 
-    The returned entry has run_status="running" and container_id set.
+    The returned entry has run_status="running" and run_handle_id set.
     Call poll_tool() later — from this process or a fresh one — to check
     on and eventually finalize it.
     """
@@ -466,11 +466,11 @@ def poll_tool(entry: LedgerEntry, session_dir: Path) -> LedgerEntry:
     Safe to call from a different process than the one that submitted the
     job: everything needed is reconstructed from the entry + session_dir.
     """
-    if entry.run_status != "running" or not entry.container_id:
+    if entry.run_status != "running" or not entry.run_handle_id:
         return entry
 
     runner = DockerRunner()
-    result = runner.poll(entry.container_id)
+    result = runner.poll(entry.run_handle_id)
     if result is None:
         return entry
 
@@ -530,26 +530,26 @@ def run_tool(
     )
 
     start = time.monotonic()
-    result = runner.poll(entry.container_id)
+    result = runner.poll(entry.run_handle_id)
     while result is None:
         if time.monotonic() - start > timeout:
             try:
-                container = runner.client.containers.get(entry.container_id)
+                container = runner.client.containers.get(entry.run_handle_id)
                 container.kill()
             except Exception:
                 pass
             try:
-                container = runner.client.containers.get(entry.container_id)
+                container = runner.client.containers.get(entry.run_handle_id)
                 container.remove(force=True)
             except Exception:
                 pass
             entry.run_status = "failed"
             entry.exit_code = -1
             raise TimeoutError(
-                f"Container {entry.container_id} exceeded timeout of {timeout}s"
+                f"Container {entry.run_handle_id} exceeded timeout of {timeout}s"
             )
         time.sleep(poll_interval)
-        result = runner.poll(entry.container_id)
+        result = runner.poll(entry.run_handle_id)
 
     _finalize_entry(entry, spec, run_dir, result, pre_snapshot, staged_input_paths)
     return entry, result
@@ -636,7 +636,7 @@ def run_script(
         ),
         files=file_refs,
         run_status="running",
-        container_id=container_id,
+        run_handle_id=container_id,
     )
     session.add(entry)
 
