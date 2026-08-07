@@ -273,9 +273,17 @@ def test_to_galaxy_workflow_empty():
 
 def test_to_galaxy_workflow_chained():
     session = LedgerSession(name="Galaxy")
-    e1 = _make_entry(tool_name="fastqc")
+    e1 = _make_entry(
+        tool_name="fastqc",
+        output_files=["reads_fastqc.html"],
+    )
     session.add(e1)
-    e2 = _make_entry(tool_name="hisat2", parent_id=e1.id)
+    e2 = _make_entry(
+        tool_name="hisat2",
+        parent_id=e1.id,
+        input_mapping={"input": "reads_fastqc.html"},
+        output_files=["aligned.bam"],
+    )
     session.add(e2)
 
     result = to_galaxy_workflow(session)
@@ -283,3 +291,38 @@ def test_to_galaxy_workflow_chained():
     step_1 = result["steps"]["1"]
     assert step_1["tool_id"] == "hisat2"
     assert step_1["input_connections"]["input"]["id"] == 0
+
+
+def test_to_galaxy_workflow_multi_input():
+    """Galaxy export must handle multi-input steps (e.g. busted needs MSA + tree)."""
+    session = LedgerSession(name="MultiInput")
+    e1 = _make_entry(
+        tool_name="mafft",
+        output_files=["gene1.aln"],
+    )
+    session.add(e1)
+    e2 = _make_entry(
+        tool_name="iqtree",
+        parent_id=e1.id,
+        input_mapping={"alignment": "gene1.aln"},
+        output_files=["gene1.treefile"],
+    )
+    session.add(e2)
+    e3 = _make_entry(
+        tool_name="busted",
+        parent_id=e2.id,
+        input_mapping={"alignment": "gene1.aln", "tree": "gene1.treefile"},
+        output_files=["gene1.busted.json"],
+    )
+    session.add(e3)
+
+    result = to_galaxy_workflow(session)
+    assert len(result["steps"]) == 3
+    # busted (step 2) should have two input connections from two different steps
+    step_2 = result["steps"]["2"]
+    assert step_2["tool_id"] == "busted"
+    assert "alignment" in step_2["input_connections"]
+    assert "tree" in step_2["input_connections"]
+    # alignment comes from mafft (step 0), tree from iqtree (step 1)
+    assert step_2["input_connections"]["alignment"]["id"] == 0
+    assert step_2["input_connections"]["tree"]["id"] == 1

@@ -362,9 +362,21 @@ def to_nextflow_from_entries(
 
 
 def to_galaxy_workflow(session: LedgerSession) -> dict:
-    """Convert a ledger session into a DAG-aware Galaxy .ga workflow JSON."""
-    children, by_id = _build_dag(session)
-    ordered = _topological_order(children)
+    """Convert a ledger session into a DAG-aware Galaxy .ga workflow JSON.
+
+    Uses the same file-lineage dependency graph as ``to_nextflow`` (multi-parent,
+    sha-aware) instead of the old single-parent ``_build_dag``. This brings
+    Galaxy export to parity with Nextflow export and correctly handles
+    multi-input steps (e.g. a tool needing both an MSA and a tree).
+    """
+    tool_entries = [
+        e for e in session.entries
+        if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
+        and e.run_status in ("completed", "failed")
+    ]
+    source_map = _build_output_source_map(tool_entries)
+    deps = _build_dependency_graph(tool_entries, source_map)
+    ordered = _topological_order_from_deps(tool_entries, deps)
 
     entry_to_step: dict[str, int] = {}
     steps = {}
@@ -382,11 +394,26 @@ def to_galaxy_workflow(session: LedgerSession) -> dict:
             else "latest"
         )
 
-        # Build input connections from parent_id
-        input_connections = {}
-        if entry.parent_id and entry.parent_id in entry_to_step:
-            parent_step = entry_to_step[entry.parent_id]
-            input_connections["input"] = {"id": parent_step, "output_name": "output"}
+        # Build input connections from file-level matching (multi-parent capable)
+        input_connections: dict[str, dict] = {}
+        input_map = _input_name_to_filename(entry)
+        for input_name, filename in input_map.items():
+            if filename in source_map:
+                producer_id, emit_name = source_map[filename]
+                if producer_id != entry.id and producer_id in entry_to_step:
+                    producer_step = entry_to_step[producer_id]
+                    # Galaxy uses output_name "output" for single-output tools;
+                    # for multi-output, map emit_name (out0, out1, ...) to
+                    # Galaxy output names (output1, output2, ...).
+                    output_idx = (
+                        int(emit_name.replace("out", ""))
+                        if emit_name.startswith("out") else 0
+                    )
+                    galaxy_output_name = f"output{output_idx + 1}" if output_idx > 0 else "output"
+                    input_connections[input_name] = {
+                        "id": producer_step,
+                        "output_name": galaxy_output_name,
+                    }
 
         steps[str(i)] = {
             "id": i,

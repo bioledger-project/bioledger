@@ -5,6 +5,7 @@ from pathlib import Path
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
+from bioledger.core.engines.config import EnginesConfig
 from bioledger.core.llm.config import LLMConfig
 
 
@@ -21,6 +22,7 @@ class BioLedgerConfig(BaseSettings):
     home_dir: Path = Field(default_factory=lambda: Path.home() / ".bioledger")
     default_model: str = ""
     llm: LLMConfig = LLMConfig()
+    engines: EnginesConfig = Field(default_factory=EnginesConfig)
 
     @model_validator(mode="after")
     def _apply_default_model(self) -> "BioLedgerConfig":

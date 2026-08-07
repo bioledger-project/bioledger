@@ -115,3 +115,24 @@ class LedgerSession(BaseModel):
     def dag_edges(self) -> list[tuple[str, str]]:
         """Return parent→child edges for workflow reconstruction."""
         return [(e.parent_id, e.id) for e in self.entries if e.parent_id is not None]
+
+    def dependency_graph(self) -> dict[str, set[str]]:
+        """Return a file-lineage dependency graph: entry_id → set of producer entry_ids.
+
+        Uses the same file-level matching as ``crystallize.to_nextflow`` —
+        multi-parent, sha-aware. This is the canonical derived graph for
+        the session, replacing ad-hoc recomputation in each consumer
+        (crystallize, agent-context capping, RO-Crate builder).
+        """
+        from bioledger.forges.analysisforge.crystallize import (
+            _build_dependency_graph,
+            _build_output_source_map,
+        )
+
+        tool_entries = [
+            e for e in self.entries
+            if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
+            and e.run_status in ("completed", "failed", "running")
+        ]
+        source_map = _build_output_source_map(tool_entries)
+        return _build_dependency_graph(tool_entries, source_map)

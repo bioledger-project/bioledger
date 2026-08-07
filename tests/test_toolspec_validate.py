@@ -27,7 +27,7 @@ def test_validate_missing_container():
     result = validate_execution(spec)
     assert not result.is_valid
     errors = [i for i in result.issues if i.severity == Severity.ERROR]
-    assert any("container" in i.field for i in errors)
+    assert any("executors" in i.field for i in errors)
 
 
 def test_validate_missing_name():
