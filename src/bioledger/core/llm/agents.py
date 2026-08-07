@@ -47,6 +47,7 @@ class ForgeDeps:
     def session_summary(self) -> str:
         """One-paragraph summary of what happened in this session so far.
         Useful as a system-prompt prefix for conversational agents."""
+        _MAX_OUTPUTS = 10
         entries = self.session.entries
         if not entries:
             return "This is a new session with no prior actions."
@@ -55,7 +56,15 @@ class ForgeDeps:
         for e in tool_runs[-3:]:  # last 3 tool runs
             name = e.tool_spec_name or "unknown"
             out_files = [f.path for f in e.files if f.role == "output"]
-            last_outputs.append(f"{name} → {', '.join(out_files) or 'no output files'}")
+            if len(out_files) > _MAX_OUTPUTS:
+                shown = ", ".join(out_files[:_MAX_OUTPUTS])
+                last_outputs.append(
+                    f"{name} → {shown} ... ({len(out_files)} total)"
+                )
+            else:
+                last_outputs.append(
+                    f"{name} → {', '.join(out_files) or 'no output files'}"
+                )
         summary = (
             f"Session '{self.session.name or self.session.id}' has "
             f"{len(entries)} entries ({len(tool_runs)} tool/script runs). "

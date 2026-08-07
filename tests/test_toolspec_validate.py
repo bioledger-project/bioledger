@@ -4,6 +4,7 @@ from bioledger.toolspec.models import (
     ExecutionSpec,
     ParamType,
     ToolInput,
+    ToolOutput,
     ToolParameter,
 )
 from bioledger.toolspec.validate import (
@@ -86,3 +87,96 @@ def test_validate_integer_param_range():
     result = validate_execution(spec, strict=True)
     issues = [i for i in result.issues if "threads" in i.field]
     assert len(issues) > 0
+
+
+def test_stem_preservation_warns_on_fixed_output():
+    """Collection input + fixed output pattern should warn about stem preservation."""
+    spec = ExecutionSpec(
+        name="test",
+        container="ubuntu:latest",
+        command="echo hello",
+        inputs={
+            "bam": ToolInput(
+                type=ParamType.FILE, format="bam", required=True,
+                collection=True,
+            ),
+        },
+        outputs={
+            "result": ToolOutput(format="txt", pattern="result.txt"),
+        },
+    )
+    result = validate_execution(spec)
+    warnings = [i for i in result.issues if i.severity == Severity.WARNING]
+    assert any("stem" in i.message.lower() for i in warnings)
+
+
+def test_stem_preservation_passes_with_wildcard():
+    """Collection input + wildcard output pattern should not warn."""
+    spec = ExecutionSpec(
+        name="test",
+        container="ubuntu:latest",
+        command="echo hello",
+        inputs={
+            "bam": ToolInput(
+                type=ParamType.FILE, format="bam", required=True,
+                collection=True,
+            ),
+        },
+        outputs={
+            "sorted": ToolOutput(format="bam", pattern="*.sorted.bam"),
+        },
+    )
+    result = validate_execution(spec)
+    warnings = [
+        i for i in result.issues
+        if i.severity == Severity.WARNING and "stem" in i.message.lower()
+    ]
+    assert len(warnings) == 0
+
+
+def test_stem_preservation_passes_with_placeholder():
+    """Collection input + {stem} placeholder output should not warn."""
+    spec = ExecutionSpec(
+        name="test",
+        container="ubuntu:latest",
+        command="echo hello",
+        inputs={
+            "bam": ToolInput(
+                type=ParamType.FILE, format="bam", required=True,
+                collection=True,
+            ),
+        },
+        outputs={
+            "sorted": ToolOutput(format="bam", pattern="{sample}.sorted.bam"),
+        },
+    )
+    result = validate_execution(spec)
+    warnings = [
+        i for i in result.issues
+        if i.severity == Severity.WARNING and "stem" in i.message.lower()
+    ]
+    assert len(warnings) == 0
+
+
+def test_stem_preservation_no_warning_without_collection():
+    """Non-collection inputs should not trigger stem-preservation lint."""
+    spec = ExecutionSpec(
+        name="test",
+        container="ubuntu:latest",
+        command="echo hello",
+        inputs={
+            "bam": ToolInput(
+                type=ParamType.FILE, format="bam", required=True,
+                collection=False,
+            ),
+        },
+        outputs={
+            "result": ToolOutput(format="txt", pattern="result.txt"),
+        },
+    )
+    result = validate_execution(spec)
+    warnings = [
+        i for i in result.issues
+        if i.severity == Severity.WARNING and "stem" in i.message.lower()
+    ]
+    assert len(warnings) == 0

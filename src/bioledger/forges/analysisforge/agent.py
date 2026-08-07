@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import shutil
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,15 @@ class ToolRunRequest(BaseModel):
             "When multiple prior runs produced a file with the same name "
             "and you need a specific one, prefix with the entry id: "
             "'<entry_id_prefix>/<filename>' (e.g. '4fccaa48/summary.json')."
+        ),
+    )
+    engine: str | None = Field(
+        default=None,
+        description=(
+            "Optional: specify a workflow engine for fan-out runs "
+            "(nextflow/snakemake/galaxy). Only set when the user explicitly "
+            "requests a specific engine or fan-out. Leave None for normal "
+            "single-tool Docker runs."
         ),
     )
 
@@ -159,6 +169,10 @@ class AnalysisForgeAgent:
         else:
             library_list = ""
 
+        # Build engine availability info for the system prompt
+        engine_status = self._build_engine_status()
+        engines_default = config.engines.default if config.engines else "auto"
+
         # Main conversational agent — structured output with explicit intent
         self._chat_agent = make_agent(
             config,
@@ -179,6 +193,8 @@ class AnalysisForgeAgent:
                 "accurate, real-time status for all jobs. "
                 "When the user wants to package results, help them review and "
                 "select entries.\n\n"
+                f"Available engines: {engine_status}\n"
+                f"Default engine: {engines_default}\n\n"
                 f"Locally installed tools:\n{tools_list}\n\n"
                 + (
                     f"Additional tools available from the library (auto-imported on use):\n"
@@ -205,30 +221,54 @@ class AnalysisForgeAgent:
             """Fetch output file contents for a tool/script run entry.
             Use this whenever the user asks about results from a specific run.
             Pass the entry ID (shown in review output or tool run messages)."""
+            _MAX_SNIPPETS = 10
             for entry in ctx.deps.session.entries:
                 if entry.id == entry_id:
                     if entry.kind not in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN):
                         return f"Entry {entry_id} is a {entry.kind.value}, not a tool/script run."
-                    snippets: list[str] = []
-                    for f in entry.files:
-                        if f.role == "output":
-                            p = Path(f.path)
-                            if p.exists() and p.stat().st_size < 50_000:
-                                try:
-                                    snippets.append(f"--- {p.name} ---\n{p.read_text()}")
-                                except Exception:
-                                    snippets.append(f"--- {p.name} --- (unreadable)")
-                            elif p.exists():
-                                size = p.stat().st_size
-                                snippets.append(
-                                    f"--- {p.name} --- ({size} bytes, too large to display)"
-                                )
-                            else:
-                                snippets.append(f"--- {p.name} --- (file not found)")
-                    if not snippets:
+                    output_files = [f for f in entry.files if f.role == "output"]
+                    if not output_files:
                         return f"Entry {entry_id} ({entry.tool_spec_name}) has no output files."
+
+                    snippets: list[str] = []
+                    excluded_names: list[str] = []
+                    for f in output_files[:_MAX_SNIPPETS]:
+                        p = Path(f.path)
+                        if p.exists() and p.stat().st_size < 50_000:
+                            try:
+                                snippets.append(f"--- {p.name} ---\n{p.read_text()}")
+                            except Exception:
+                                snippets.append(f"--- {p.name} --- (unreadable)")
+                        elif p.exists():
+                            size = p.stat().st_size
+                            snippets.append(
+                                f"--- {p.name} --- ({size} bytes, too large to display)"
+                            )
+                        else:
+                            snippets.append(f"--- {p.name} --- (file not found)")
+
+                    # Collect names of excluded files
+                    if len(output_files) > _MAX_SNIPPETS:
+                        excluded_names = [
+                            Path(f.path).name
+                            for f in output_files[_MAX_SNIPPETS:]
+                        ]
+
                     header = f"Outputs for {entry.tool_spec_name} run {entry_id}:"
-                    return header + "\n\n" + "\n\n".join(snippets)
+                    parts = [header, "\n\n".join(snippets)]
+
+                    if excluded_names:
+                        total = len(output_files)
+                        shown = _MAX_SNIPPETS
+                        excluded_count = total - shown
+                        excluded_preview = ", ".join(excluded_names[:5])
+                        if len(excluded_names) > 5:
+                            excluded_preview += f", ... ({excluded_count - 5} more)"
+                        parts.append(
+                            f"\nShowing {shown} of {total} outputs. "
+                            f"Excluded: {excluded_preview}"
+                        )
+                    return "\n\n".join(parts)
             return f"No entry found with ID '{entry_id}'."
 
         @self._chat_agent.tool
@@ -237,20 +277,37 @@ class AnalysisForgeAgent:
             Use this when the user asks about job status, running tasks,
             or whether something has finished. Returns a summary of every
             tool/script run entry with its current status."""
+            _MAX_OUTPUTS = 5
             lines: list[str] = []
             for entry in ctx.deps.session.entries:
                 if entry.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN):
-                    outputs = [
+                    output_files = [
                         Path(f.path).name for f in entry.files if f.role == "output"
                     ]
+                    if len(output_files) > _MAX_OUTPUTS:
+                        total = len(output_files)
+                        shown = output_files[:_MAX_OUTPUTS]
+                        outputs_str = (
+                            f"{shown} ... ({total} total)"
+                        )
+                    else:
+                        outputs_str = str(output_files)
                     lines.append(
                         f"  {entry.id} ({entry.tool_spec_name}): "
                         f"status={entry.run_status}, exit={entry.exit_code}, "
-                        f"outputs={outputs}"
+                        f"outputs={outputs_str}"
                     )
             if not lines:
                 return "No tool/script runs in this session."
             return "Job statuses:\n" + "\n".join(lines)
+
+        @self._chat_agent.tool
+        def list_available_engines(ctx: RunContext[ForgeDeps]) -> str:
+            """List which workflow engines are installed and available.
+            Use this when the user asks about engine availability or
+            whether a specific engine (nextflow/snakemake/galaxy) can
+            be used for a fan-out or workflow run."""
+            return self._build_engine_status()
 
         # Tool selection agent — structured output
         self._tool_select_agent = make_agent(
@@ -380,15 +437,29 @@ class AnalysisForgeAgent:
         # The LLM uses these to chain tools: an output from run X can be an
         # input to a later tool. When multiple entries share a filename, the
         # LLM should disambiguate using '<entry_id>/<filename>' in the source.
+        # Capped at _MAX_PRIOR_OUTPUTS to avoid token blowup on fan-out runs.
+        _MAX_PRIOR_OUTPUTS = 30
         prior_outputs: list[str] = []
         for entry in reversed(self.session.entries):
             if entry.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN):
-                for f in entry.files:
-                    if f.role == "output":
+                output_files = [f for f in entry.files if f.role == "output"]
+                if len(output_files) > 10:
+                    # Cap per-entry outputs: show first few + count
+                    shown = output_files[:5]
+                    total = len(output_files)
+                    names = ", ".join(Path(f.path).name for f in shown)
+                    prior_outputs.append(
+                        f"entry={entry.id} tool={entry.tool_spec_name} "
+                        f"outputs={names} ... ({total} total)"
+                    )
+                else:
+                    for f in output_files:
                         prior_outputs.append(
                             f"entry={entry.id} tool={entry.tool_spec_name} "
                             f"file={Path(f.path).name}"
                         )
+                if len(prior_outputs) >= _MAX_PRIOR_OUTPUTS:
+                    break
 
         # Available files from dataset
         dataset_files: list[str] = []
@@ -397,6 +468,11 @@ class AnalysisForgeAgent:
                 loc = f.downloaded_path or f.location
                 dataset_files.append(f"{Path(loc).name} (format: {f.format})")
 
+        if len(prior_outputs) > _MAX_PRIOR_OUTPUTS:
+            prior_outputs = prior_outputs[:_MAX_PRIOR_OUTPUTS]
+            prior_outputs.append(
+                f"... ({len(prior_outputs)} outputs shown, more available)"
+            )
         prior_outputs_text = (
             "\n".join(f"  - {o}" for o in prior_outputs)
             if prior_outputs
@@ -491,14 +567,53 @@ class AnalysisForgeAgent:
         Only scans entries with run_status == "running" (not the full
         history). Persists the session if anything changed. Returns the
         entries that just transitioned out of "running" this call.
+
+        Adapter-folding: branches on entry.executor to decide which
+        adapter to poll. Docker/conda entries use the existing poll_tool()
+        path; engine entries (snakemake/nextflow/galaxy) use the
+        adapter's poll() method via dispatch().
         """
+        from bioledger.core.engines.dispatch import _get_engine_adapter
+        from bioledger.core.engines.protocol import RunHandle
+
         session_dir = get_session_dir(self.config.home_dir, self.session.id)
         newly_completed = []
         changed = False
         for entry in self.session.entries:
             if entry.run_status != "running":
                 continue
-            poll_tool(entry, session_dir)
+
+            executor = entry.executor or "docker"
+            if executor in ("docker", "conda"):
+                # Existing Docker path — poll_tool finalizes in one step
+                poll_tool(entry, session_dir)
+            else:
+                # Engine adapter path — use adapter.poll()
+                try:
+                    adapter = _get_engine_adapter(executor, self.config.engines)
+                    rh = RunHandle(
+                        executor=executor,
+                        run_id=entry.run_handle_id or "",
+                        entry_id=entry.id,
+                        work_dir=session_dir,
+                    )
+                    status = adapter.poll(rh)
+                    if status is not None and status.state in (
+                        "completed", "failed", "unknown"
+                    ):
+                        entry.run_status = status.state
+                        entry.exit_code = 0 if status.state == "completed" else 1
+                        if status.message:
+                            entry.notes = (
+                                (entry.notes + "\n" if entry.notes else "")
+                                + status.message
+                            )
+                except (NotImplementedError, RuntimeError) as e:
+                    logging.warning(
+                        "Cannot poll entry %s with executor %s: %s",
+                        entry.id, executor, e,
+                    )
+
             if entry.run_status != "running":
                 newly_completed.append(entry)
                 changed = True
@@ -536,13 +651,25 @@ class AnalysisForgeAgent:
         return summaries
 
     def _session_summary(self) -> str:
-        """One-line-per-entry summary for LLM context."""
+        """One-line-per-entry summary for LLM context.
+
+        Output file listings are capped at _MAX_OUTPUTS per entry to avoid
+        token blowup on fan-out runs (e.g. 500-gene scatter → one entry
+        with 500 output files).
+        """
+        _MAX_OUTPUTS = 10
         lines = []
         for entry in self.session.entries:
             if entry.kind == EntryKind.TOOL_RUN:
                 out_files = [
                     Path(f.path).name for f in entry.files if f.role == "output"
                 ]
+                if len(out_files) > _MAX_OUTPUTS:
+                    total = len(out_files)
+                    shown = ", ".join(out_files[:_MAX_OUTPUTS])
+                    out_str = f"{shown} ... ({total} total)"
+                else:
+                    out_str = ", ".join(out_files)
                 status = (
                     "running in background"
                     if entry.run_status == "running"
@@ -550,8 +677,41 @@ class AnalysisForgeAgent:
                 )
                 lines.append(
                     f"  [{entry.id}] {entry.tool_spec_name} -> "
-                    f"{', '.join(out_files)} ({status})"
+                    f"{out_str} ({status})"
                 )
             elif entry.kind == EntryKind.DATA_IMPORT:
                 lines.append(f"  [{entry.id}] data_import: {entry.notes}")
         return "\n".join(lines) or "  (no entries yet)"
+
+    def _build_engine_status(self) -> str:
+        """Build a human-readable summary of installed workflow engines.
+
+        Checks each engine's binary availability and Python package
+        installation status. Used in the system prompt and by the
+        list_available_engines agent tool.
+        """
+        statuses: list[str] = []
+        for engine in ("nextflow", "snakemake", "galaxy"):
+            binary_found = shutil.which(engine) is not None
+            pkg_installed = False
+            try:
+                if engine == "snakemake":
+                    import snakemake  # noqa: F401
+                    pkg_installed = True
+                elif engine == "galaxy":
+                    import galaxy.tool_util  # noqa: F401
+                    pkg_installed = True
+            except ImportError:
+                pass
+
+            if binary_found or pkg_installed:
+                parts = [engine, "installed"]
+                if binary_found and not pkg_installed:
+                    parts.append("(binary found)")
+                elif not binary_found and pkg_installed:
+                    parts.append("(package installed, binary not on PATH)")
+                statuses.append(" ".join(parts))
+            else:
+                statuses.append(f"{engine} (not installed)")
+
+        return ", ".join(statuses)
