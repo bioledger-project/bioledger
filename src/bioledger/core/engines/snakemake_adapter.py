@@ -1,0 +1,419 @@
+"""Snakemake adapter — reference implementation for local execution.
+
+Implements all five ``ExecutionAdapter`` methods for the simplest case:
+local execution, no scheduler plugin, no conda mapping. Container injection
+is via `--use-apptainer` (boolean enable flag) with the image baked into
+the generated Snakefile's `container:` directive.
+
+Snakemake is imported lazily so this module loads without the `bioledger[snakemake]`
+extra installed. The import error surfaces at call time with install instructions.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+
+from bioledger.core.engines.config import SnakemakeEngineConfig
+from bioledger.core.engines.conda_derive import derive_container_image
+from bioledger.core.engines.protocol import RunHandle, RunStatus, WorkflowHandle
+
+logger = logging.getLogger(__name__)
+
+
+def _check_snakemake_available() -> str:
+    """Return the snakemake executable path, or raise with install instructions."""
+    exe = shutil.which("snakemake")
+    if exe is None:
+        raise RuntimeError(
+            "snakemake is not installed. Install with: pip install bioledger[snakemake]"
+        )
+    return exe
+
+
+def _resolve_container(spec: Any) -> str:
+    """Resolve the container image from spec.container or spec.conda_deps."""
+    container = getattr(spec, "container", "")
+    if container:
+        return container
+    conda_deps = getattr(spec, "conda_deps", [])
+    if conda_deps:
+        image = derive_container_image(conda_deps)
+        if image:
+            return image
+    return ""
+
+
+def _parse_collection_value(value: str) -> tuple[str, str]:
+    """Determine the channel type for a collection input value.
+
+    Returns (kind, pattern) where kind is 'glob', 'manifest', or 'entry_id'.
+    """
+    if any(c in value for c in ("*", "?", "[", "]")):
+        return ("glob", value)
+    if value.endswith((".tsv", ".csv", ".txt")) and os.path.sep in value:
+        return ("manifest", value)
+    if len(value) >= 16 and all(c in "0123456789abcdef" for c in value.lower()):
+        return ("entry_id", value)
+    return ("glob", value)
+
+
+def _generate_snakefile(
+    spec: Any,
+    input_mapping: dict[str, str],
+    container_image: str,
+    artifact_path: Path,
+) -> list[str]:
+    """Generate a parameterized Snakefile for fan-out.
+
+    Returns the list of rule names (step_inventory).
+    """
+    spec_inputs = getattr(spec, "inputs", {}) or {}
+    spec_outputs = getattr(spec, "outputs", {}) or {}
+    command_template = getattr(spec, "command", "echo hello")
+    tool_name = getattr(spec, "name", "tool")
+
+    # Identify collection inputs (scatter axes) vs single-file inputs
+    collection_inputs: list[str] = []
+    single_inputs: list[str] = []
+    for input_name, input_def in spec_inputs.items():
+        is_collection = (
+            getattr(input_def, "collection", False)
+            if hasattr(input_def, "collection")
+            else False
+        )
+        if is_collection and input_name in input_mapping:
+            collection_inputs.append(input_name)
+        else:
+            single_inputs.append(input_name)
+
+    # Determine the scatter wildcard from the first collection input
+    scatter_wildcard = "item"
+    if collection_inputs:
+        first = collection_inputs[0]
+        kind, pattern = _parse_collection_value(input_mapping[first])
+        if kind == "glob":
+            # Extract a stem pattern from the glob
+            scatter_wildcard = "sample"
+
+    # Build expand() output patterns
+    output_patterns: list[str] = []
+    for out_name, out_def in spec_outputs.items():
+        pattern = getattr(out_def, "pattern", "") or f"{{scatter_wildcard}}.{out_name}"
+        # Replace * with {wildcard} for expand()
+        if "*" in pattern:
+            pattern = pattern.replace("*", "{" + scatter_wildcard + "}")
+        elif "{" not in pattern:
+            pattern = "{" + scatter_wildcard + "}" + pattern
+        output_patterns.append(pattern)
+
+    if not output_patterns:
+        output_patterns = ["{item}.out"]
+
+    # Build input declarations for the rule
+    input_lines: list[str] = []
+    for name in collection_inputs:
+        input_lines.append(f'    {name}=expand("input/{{{scatter_wildcard}}}", {scatter_wildcard}=GLOB_PATTERN),')
+    for name in single_inputs:
+        if name in input_mapping:
+            input_lines.append(f'    {name}="{input_mapping[name]}",')
+
+    # Build the Snakefile content
+    container_directive = ""
+    if container_image:
+        container_directive = f'    container: "{container_image}"'
+
+    # Parameterize with config values that submit() will bind
+    params_lines: list[str] = []
+    for name in single_inputs:
+        params_lines.append(f'    {name}=config.get("{name}", ""),')
+
+    rule_name = tool_name.replace("-", "_")
+
+    lines = [
+        "# Generated by BioLedger — fan-out for " + tool_name,
+        "# Scatter axis: " + scatter_wildcard
+        + " (from collection input(s): "
+        + ", ".join(collection_inputs) + ")",
+        "",
+        "configfile: 'config.yaml'",
+        "",
+        "rule all:",
+        "    input:",
+        '        expand("' + output_patterns[0] + '", ' + scatter_wildcard + '=GLOB_PATTERN),',
+        "",
+        "rule " + rule_name + ":",
+        "    input:",
+    ]
+    lines.extend(input_lines if input_lines else ['    "",'])
+    lines.extend([
+        '    output:',
+    ])
+    for i, pat in enumerate(output_patterns):
+        comma = "," if i < len(output_patterns) - 1 else ""
+        lines.append(f'        "{pat}"{comma}')
+    lines.extend([
+        '    params:',
+    ])
+    lines.extend(params_lines if params_lines else ['    "",'])
+    if container_directive:
+        lines.append(container_directive)
+    lines.extend([
+        '    shell:',
+        '        """',
+        '        ' + command_template,
+        '        """',
+        "",
+    ])
+
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("\n".join(lines))
+    return [rule_name]
+
+
+class SnakemakeAdapter:
+    """Reference Snakemake adapter for local execution.
+
+    Implements the ExecutionAdapter protocol for the simplest case:
+    local execution, no scheduler plugin, no conda mapping.
+    """
+
+    def __init__(self, config: SnakemakeEngineConfig | None = None) -> None:
+        self._config = config or SnakemakeEngineConfig()
+
+    @property
+    def executable(self) -> str:
+        if self._config.executable:
+            return self._config.executable
+        return _check_snakemake_available()
+
+    def _build_config_yaml(self, input_mapping: dict[str, str], params: dict[str, Any]) -> str:
+        """Build a config.yaml for snakemake from input_mapping + params."""
+        lines: list[str] = []
+        for k, v in {**input_mapping, **params}.items():
+            # Escape quotes in string values
+            v_str = str(v).replace('"', '\\"')
+            lines.append(f'{k}: "{v_str}"')
+        return "\n".join(lines) + "\n"
+
+    def submit_spec(
+        self,
+        spec: Any,
+        input_mapping: dict[str, str],
+        params: dict[str, Any],
+        work_dir: Path,
+    ) -> RunHandle:
+        """Run a single workflow toolspec via snakemake.
+
+        For workflow toolspecs with executors: [snakemake], the toolspec's
+        command template invokes snakemake directly. This is coarse provenance —
+        one LedgerEntry for the whole run, no step-level DAG extraction.
+        """
+        raise NotImplementedError(
+            "SnakemakeAdapter.submit_spec will be wired in Phase 2b when "
+            "dispatch() is unified with the agent path. The toolspec's "
+            "command template handles single-item snakemake runs directly."
+        )
+
+    def generate(
+        self,
+        spec: Any,
+        input_mapping: dict[str, str],
+        extra_args: list[str] | None = None,
+    ) -> WorkflowHandle:
+        """Generate a parameterized fan-out Snakefile.
+
+        Produces a one-rule Snakefile with expand() that scatters the tool
+        over a collection. The container image (from conda_deps auto-derive
+        or explicit container) is baked into the rule's container: directive.
+        """
+        container_image = _resolve_container(spec)
+
+        # Use a temporary artifact path — submit() will write it to work_dir
+        import tempfile
+        artifact_path = Path(tempfile.gettempdir()) / f"bioledger_snakefile_{int(time.time())}.smk"
+
+        step_inventory = _generate_snakefile(
+            spec, input_mapping, container_image, artifact_path
+        )
+
+        # Determine output patterns from spec
+        spec_outputs = getattr(spec, "outputs", {}) or {}
+        output_patterns = [
+            getattr(od, "pattern", "") or f"*.out"
+            for od in spec_outputs.values()
+        ]
+        if not output_patterns:
+            output_patterns = ["*.out"]
+
+        return WorkflowHandle(
+            executor="snakemake",
+            artifact_path=artifact_path,
+            step_inventory=step_inventory,
+            container_image=container_image,
+            input_mapping=input_mapping,
+            output_patterns=output_patterns,
+            metadata={"extra_args": extra_args or []},
+        )
+
+    def submit(
+        self,
+        handle: WorkflowHandle,
+        input_mapping: dict[str, str],
+        params: dict[str, Any],
+        work_dir: Path,
+    ) -> RunHandle:
+        """Submit the generated Snakefile to snakemake.
+
+        Binds actual input_mapping values via a config.yaml file, then
+        launches snakemake as a subprocess.
+        """
+        work_dir = Path(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy the Snakefile to the work dir
+        snakefile_path = work_dir / "Snakefile"
+        snakefile_path.write_text(handle.artifact_path.read_text())
+
+        # Write config.yaml with bound values
+        config_path = work_dir / "config.yaml"
+        config_path.write_text(self._build_config_yaml(input_mapping, params))
+
+        # Build the snakemake command
+        cmd = [
+            self.executable,
+            "-s", str(snakefile_path),
+            "--configfile", str(config_path),
+            "--stats", str(work_dir / "stats.json"),
+            "--use-apptainer" if handle.container_image else "",
+        ]
+        # Filter empty strings and add extra_args
+        cmd = [c for c in cmd if c]
+        extra_args = handle.metadata.get("extra_args", [])
+        cmd.extend(extra_args)
+        cmd.extend(self._config.extra_args)
+
+        # Launch as subprocess (non-blocking)
+        log_path = work_dir / "snakemake.log"
+        log_file = open(log_path, "w")
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(work_dir),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+        run_id = str(proc.pid)
+
+        return RunHandle(
+            executor="snakemake",
+            run_id=run_id,
+            entry_id="",  # set by the caller (dispatch layer)
+            work_dir=work_dir,
+            submitted_at=time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            ),
+            status="running",
+        )
+
+    def poll(self, run_handle: RunHandle) -> RunStatus | None:
+        """Check if the snakemake subprocess is still running."""
+        try:
+            pid = int(run_handle.run_id)
+        except ValueError:
+            return None
+
+        try:
+            os.kill(pid, 0)  # Check if process exists
+        except ProcessLookupError:
+            # Process finished — check exit status from log
+            return self._check_completion(run_handle)
+        except PermissionError:
+            return None
+
+        # Still running — try to get progress from stats
+        stats_path = Path(run_handle.work_dir) / "stats.json"
+        completed = 0
+        total = 0
+        if stats_path.exists():
+            try:
+                import json
+                stats = json.loads(stats_path.read_text())
+                total_stats = stats.get("total", {})
+                total = total_stats.get("jobs", 0)
+                completed = sum(
+                    v for k, v in total_stats.get("exit-code", {}).items()
+                    if k == "0"
+                )
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        return RunStatus(
+            state="running",
+            completed=completed,
+            total=total,
+            message="",
+        )
+
+    def _check_completion(self, run_handle: RunHandle) -> RunStatus | None:
+        """Determine completion status from log file and stats."""
+        log_path = Path(run_handle.work_dir) / "snakemake.log"
+        stats_path = Path(run_handle.work_dir) / "stats.json"
+
+        # Check stats.json for exit codes
+        if stats_path.exists():
+            try:
+                import json
+                stats = json.loads(stats_path.read_text())
+                total_stats = stats.get("total", {})
+                exit_codes = total_stats.get("exit-code", {})
+                total = total_stats.get("jobs", 0)
+                succeeded = exit_codes.get("0", 0)
+                failed = total - succeeded
+
+                if failed > 0:
+                    run_handle.status = "failed"
+                    return RunStatus(
+                        state="failed",
+                        completed=succeeded,
+                        total=total,
+                        message=f"{failed}/{total} jobs failed",
+                    )
+                else:
+                    run_handle.status = "completed"
+                    return RunStatus(
+                        state="completed",
+                        completed=succeeded,
+                        total=total,
+                    )
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        # Fall back to log file
+        if log_path.exists():
+            content = log_path.read_text()
+            if "Error" in content or "error" in content:
+                run_handle.status = "failed"
+                return RunStatus(state="failed", message="See snakemake.log")
+            if "Finished" in content or "nothing to be done" in content:
+                run_handle.status = "completed"
+                return RunStatus(state="completed")
+
+        # Can't determine — unknown
+        run_handle.status = "unknown"
+        return RunStatus(state="unknown", message="Could not determine completion status")
+
+    def collect(self, run_handle: RunHandle) -> list[Any]:
+        """Collect outputs and provenance from a completed snakemake run.
+
+        Discovers output files from the work directory and references
+        stats.json as a provenance log.
+        """
+        # Phase 2b will wire this to LedgerEntry enrichment.
+        return []

@@ -35,6 +35,15 @@ def register_adapter(engine: str, adapter_cls: type) -> None:
     _adapter_registry[engine] = adapter_cls
 
 
+# Register the Snakemake adapter (import-safe — snakemake_adapter imports
+# snakemake lazily, so this works even without the extra installed).
+try:
+    from bioledger.core.engines.snakemake_adapter import SnakemakeAdapter
+    register_adapter("snakemake", SnakemakeAdapter)
+except ImportError:
+    pass
+
+
 def _detect_installed_engine() -> str | None:
     """Auto-detect the first available engine in preference order.
 

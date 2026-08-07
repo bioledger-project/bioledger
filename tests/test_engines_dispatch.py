@@ -90,9 +90,15 @@ class TestDispatch:
         adapter = dispatch(spec)
         assert isinstance(adapter, DockerRunnerFacade)
 
-    def test_engine_executor_not_implemented(self):
+    def test_snakemake_executor_returns_adapter(self):
+        from bioledger.core.engines.snakemake_adapter import SnakemakeAdapter
         spec = _MockSpec(executors=["snakemake"])
-        with pytest.raises(NotImplementedError, match="snakemake adapter not yet"):
+        adapter = dispatch(spec)
+        assert isinstance(adapter, SnakemakeAdapter)
+
+    def test_nextflow_executor_not_implemented(self):
+        spec = _MockSpec(executors=["nextflow"])
+        with pytest.raises(NotImplementedError, match="nextflow adapter not yet"):
             dispatch(spec)
 
     def test_multiple_engine_executors_raises(self):
