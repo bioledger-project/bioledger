@@ -96,10 +96,17 @@ class TestDispatch:
         adapter = dispatch(spec)
         assert isinstance(adapter, SnakemakeAdapter)
 
-    def test_nextflow_executor_not_implemented(self):
+    def test_nextflow_executor_returns_adapter(self):
+        from bioledger.core.engines.nextflow_adapter import NextflowAdapter
         spec = _MockSpec(executors=["nextflow"])
-        with pytest.raises(NotImplementedError, match="nextflow adapter not yet"):
-            dispatch(spec)
+        adapter = dispatch(spec)
+        assert isinstance(adapter, NextflowAdapter)
+
+    def test_galaxy_executor_returns_adapter(self):
+        from bioledger.core.engines.galaxy_adapter import GalaxyAdapter
+        spec = _MockSpec(executors=["galaxy"])
+        adapter = dispatch(spec)
+        assert isinstance(adapter, GalaxyAdapter)
 
     def test_multiple_engine_executors_raises(self):
         spec = _MockSpec(executors=["nextflow", "galaxy"])
@@ -112,9 +119,10 @@ class TestDispatch:
             dispatch(spec)
 
     def test_engine_override(self):
+        from bioledger.core.engines.galaxy_adapter import GalaxyAdapter
         spec = _MockSpec(executors=["docker"])
-        with pytest.raises(NotImplementedError, match="galaxy adapter not yet"):
-            dispatch(spec, engine="galaxy")
+        adapter = dispatch(spec, engine="galaxy")
+        assert isinstance(adapter, GalaxyAdapter)
 
 
 class TestResolveEngineForFanout:

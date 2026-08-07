@@ -43,6 +43,22 @@ try:
 except ImportError:
     pass
 
+# Register the Nextflow adapter (import-safe — nextflow_adapter shells out
+# to the nextflow binary lazily, so this works even without nextflow installed).
+try:
+    from bioledger.core.engines.nextflow_adapter import NextflowAdapter
+    register_adapter("nextflow", NextflowAdapter)
+except ImportError:
+    pass
+
+# Register the Galaxy adapter (import-safe — galaxy_adapter imports bioblend
+# lazily, so this works even without the extra installed).
+try:
+    from bioledger.core.engines.galaxy_adapter import GalaxyAdapter
+    register_adapter("galaxy", GalaxyAdapter)
+except ImportError:
+    pass
+
 
 def _detect_installed_engine() -> str | None:
     """Auto-detect the first available engine in preference order.
