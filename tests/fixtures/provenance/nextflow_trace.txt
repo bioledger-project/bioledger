@@ -1,0 +1,5 @@
+task_id	process	tag	hash	native_id	attempt	complete	exit	duration	realtime	%cpu	%mem	vmem	rss	peak_rss	peak_vmem	rchar	wchar	scratch	work_dir	name
+1	samtools_sort	sample_A	9f8e7d6	12345	1	true	0	45s	45s	120.5	2.1	500MB	200MB	600MB	550MB	1.2GB	800MB	0	/work/9f/8e7d6	samtools_sort_sample_A
+2	samtools_index	sample_A	1a2b3c4	12346	1	true	0	12s	12s	95.3	1.5	300MB	100MB	350MB	320MB	500MB	200MB	0	/work/1a/2b3c4	samtools_index_sample_A
+3	samtools_sort	sample_B	5e6f7g8	12347	1	true	0	42s	42s	118.2	2.0	480MB	190MB	580MB	530MB	1.1GB	750MB	0	/work/5e/6f7g8	samtools_sort_sample_B
+4	samtools_index	sample_B	9h0i1j2	12348	1	true	0	10s	10s	92.1	1.4	280MB	95MB	330MB	300MB	480MB	180MB	0	/work/9h/0i1j2	samtools_index_sample_B

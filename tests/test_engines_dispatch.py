@@ -14,7 +14,7 @@ from bioledger.core.engines.docker_facade import DockerRunnerFacade
 from bioledger.core.engines.protocol import (
     ExecutionAdapter,
     RunHandle,
-    RunResult,
+    RunStatus,
     WorkflowHandle,
 )
 
@@ -24,30 +24,33 @@ class TestProtocol:
         facade = DockerRunnerFacade()
         assert isinstance(facade, ExecutionAdapter)
 
-    def test_run_result_defaults(self):
-        r = RunResult(exit_code=0)
-        assert r.exit_code == 0
-        assert r.stdout == ""
-        assert r.output_files == []
-        assert r.provenance_files == []
+    def test_run_status_defaults(self):
+        rs = RunStatus(state="running")
+        assert rs.state == "running"
+        assert rs.completed == 0
+        assert rs.total == 0
+        assert rs.message == ""
 
     def test_workflow_handle_defaults(self):
-        wh = WorkflowHandle(engine="snakemake", workflow_text="rule all:")
-        assert wh.engine == "snakemake"
-        assert wh.workflow_text == "rule all:"
+        wh = WorkflowHandle(
+            executor="snakemake",
+            artifact_path="/tmp/Snakefile",
+        )
+        assert wh.executor == "snakemake"
+        assert wh.step_inventory == []
         assert wh.container_image == ""
         assert wh.input_mapping == {}
 
     def test_run_handle_defaults(self):
-        wh = WorkflowHandle(engine="snakemake", workflow_text="")
         rh = RunHandle(
-            engine="snakemake",
+            executor="snakemake",
             run_id="job-1",
-            workflow_handle=wh,
+            entry_id="entry-abc",
             work_dir="/tmp/work",
         )
-        assert rh.engine == "snakemake"
+        assert rh.executor == "snakemake"
         assert rh.run_id == "job-1"
+        assert rh.entry_id == "entry-abc"
         assert rh.status == "running"
 
 
@@ -55,13 +58,13 @@ class TestDockerFacade:
     def test_generate_raises_not_implemented(self):
         facade = DockerRunnerFacade()
         with pytest.raises(NotImplementedError, match="cannot fan-out"):
-            facade.generate(spec=None, input_mapping={}, work_dir=None)  # type: ignore
+            facade.generate(spec=None, input_mapping={})  # type: ignore
 
     def test_submit_raises_not_implemented(self):
         facade = DockerRunnerFacade()
-        wh = WorkflowHandle(engine="snakemake", workflow_text="")
+        wh = WorkflowHandle(executor="snakemake", artifact_path="/tmp/Snakefile")
         with pytest.raises(NotImplementedError, match="cannot submit"):
-            facade.submit(wh, input_mapping={}, work_dir=None)  # type: ignore
+            facade.submit(wh, input_mapping={}, params={}, work_dir=None)  # type: ignore
 
 
 class _MockSpec:

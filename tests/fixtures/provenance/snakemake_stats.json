@@ -1,0 +1,30 @@
+{
+  "samtools_sort": {
+    "mean-seconds": 43.5,
+    "max-seconds": 45.0,
+    "min-seconds": 42.0,
+    "total-seconds": 87.0,
+    "mean-input-bytes": 500000000,
+    "mean-output-bytes": 480000000,
+    "jobs": 2,
+    "exit-code": {"0": 2}
+  },
+  "samtools_index": {
+    "mean-seconds": 11.0,
+    "max-seconds": 12.0,
+    "min-seconds": 10.0,
+    "total-seconds": 22.0,
+    "mean-input-bytes": 480000000,
+    "mean-output-bytes": 5000000,
+    "jobs": 2,
+    "exit-code": {"0": 2}
+  },
+  "total": {
+    "mean-seconds": 27.25,
+    "max-seconds": 45.0,
+    "min-seconds": 10.0,
+    "total-seconds": 109.0,
+    "jobs": 4,
+    "exit-code": {"0": 4}
+  }
+}

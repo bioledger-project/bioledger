@@ -1,0 +1,42 @@
+{
+  "id": "invocation-abc123",
+  "state": "scheduled",
+  "workflow_id": "workflow-xyz",
+  "history_id": "history-def",
+  "create_time": "2025-01-15T10:00:00Z",
+  "update_time": "2025-01-15T10:02:30Z",
+  "steps": [
+    {
+      "id": 0,
+      "workflow_step_id": 0,
+      "tool_id": "toolshed.g2.bx.psu.edu/repos/iuc/samtools_sort/samtools_sort/1.17",
+      "tool_version": "1.17",
+      "job_id": "job-001",
+      "job_state": "ok",
+      "create_time": "2025-01-15T10:00:05Z",
+      "update_time": "2025-01-15T10:00:50Z",
+      "inputs": {
+        "input1": {"id": "dataset-aaa", "src": "hda"}
+      },
+      "outputs": {
+        "out_file1": {"id": "dataset-bbb", "src": "hda"}
+      }
+    },
+    {
+      "id": 1,
+      "workflow_step_id": 1,
+      "tool_id": "toolshed.g2.bx.psu.edu/repos/devteam/samtools_index/samtools_index/1.17",
+      "tool_version": "1.17",
+      "job_id": "job-002",
+      "job_state": "ok",
+      "create_time": "2025-01-15T10:00:55Z",
+      "update_time": "2025-01-15T10:01:10Z",
+      "inputs": {
+        "input1": {"id": "dataset-bbb", "src": "hda"}
+      },
+      "outputs": {
+        "out_file1": {"id": "dataset-ccc", "src": "hda"}
+      }
+    }
+  ]
+}

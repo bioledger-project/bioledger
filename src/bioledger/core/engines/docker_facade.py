@@ -11,8 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from bioledger.core.containers.docker import DockerRunner, RunResult
-from bioledger.core.engines.protocol import RunHandle, WorkflowHandle
+from bioledger.core.containers.docker import DockerRunner
+from bioledger.core.engines.protocol import RunHandle, RunStatus, WorkflowHandle
 
 
 class DockerRunnerFacade:
@@ -43,10 +43,10 @@ class DockerRunnerFacade:
     def submit_spec(
         self,
         spec: Any,
-        input_files: dict[str, Path],
+        input_mapping: dict[str, str],
+        params: dict[str, Any],
         work_dir: Path,
-        params: dict[str, Any] | None = None,
-    ) -> tuple[str, RunResult | None]:
+    ) -> RunHandle:
         """Submit a single tool run via Docker.
 
         This is a synchronous stub — the actual staging and command rendering
@@ -67,7 +67,7 @@ class DockerRunnerFacade:
         self,
         spec: Any,
         input_mapping: dict[str, str],
-        work_dir: Path,
+        extra_args: list[str] | None = None,
     ) -> WorkflowHandle:
         """Docker cannot fan-out — requires a real workflow engine."""
         raise NotImplementedError(
@@ -80,23 +80,32 @@ class DockerRunnerFacade:
         self,
         handle: WorkflowHandle,
         input_mapping: dict[str, str],
+        params: dict[str, Any],
         work_dir: Path,
     ) -> RunHandle:
         raise NotImplementedError(
             "Docker cannot submit generated workflows — use submit_spec() for single tools."
         )
 
-    def poll(self, run_handle: RunHandle) -> RunResult | None:
+    def poll(self, run_handle: RunHandle) -> RunStatus | None:
         """Poll a Docker container for completion."""
         result = self.runner.poll(run_handle.run_id)
-        if result is not None:
-            run_handle.status = "completed" if result.exit_code == 0 else "failed"
-        return result
+        if result is None:
+            return None
+        run_handle.status = "completed" if result.exit_code == 0 else "failed"
+        return RunStatus(
+            state="completed" if result.exit_code == 0 else "failed",
+            message=result.stderr or "",
+        )
 
-    def collect(self, run_handle: RunHandle) -> tuple[list[Path], dict[str, Any]]:
+    def collect(self, run_handle: RunHandle) -> list[Any]:
         """Collect outputs from a completed Docker run.
 
         Docker runs don't produce engine-native provenance files — the
-        ledger entry itself is the provenance record.
+        ledger entry itself is the provenance record. For the Docker facade,
+        poll() and collect() share the same underlying poll_tool() call,
+        since Docker's poll_tool() already does both status-check and
+        finalization in one step. collect() after a terminal poll() is
+        effectively a no-op for Docker.
         """
-        return ([], {})
+        return []
