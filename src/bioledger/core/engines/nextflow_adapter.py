@@ -22,9 +22,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+from bioledger.core.engines.conda_derive import resolve_container_from_spec
 from bioledger.core.engines.config import NextflowEngineConfig
-from bioledger.core.engines.conda_derive import derive_container_image
-from bioledger.core.engines.protocol import RunHandle, RunStatus, WorkflowHandle
+from bioledger.core.engines.protocol import (
+    RunHandle,
+    RunStatus,
+    WorkflowHandle,
+    build_output_patterns,
+    parse_collection_value,
+    split_collection_inputs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,28 +48,20 @@ def _check_nextflow_available() -> str:
 
 
 def _resolve_container(spec: Any) -> str:
-    """Resolve the container image from spec.container or spec.conda_deps."""
-    container = getattr(spec, "container", "")
-    if container:
-        return container
-    conda_deps = getattr(spec, "conda_deps", [])
-    if conda_deps:
-        image = derive_container_image(conda_deps)
-        if image:
-            return image
-    return ""
+    """Resolve the container image from spec.container or spec.conda_deps.
+
+    .. deprecated:: Use ``resolve_container_from_spec`` from
+        ``conda_derive`` directly.
+    """
+    return resolve_container_from_spec(spec)
 
 
 def _parse_collection_value(value: str) -> tuple[str, str]:
     """Determine the channel type for a collection input value.
 
-    Returns (kind, pattern) where kind is 'glob', 'manifest', or 'entry_id'.
+    .. deprecated:: Use ``parse_collection_value`` from ``protocol`` directly.
     """
-    if any(c in value for c in ("*", "?", "[", "]")):
-        return ("glob", value)
-    if value.endswith((".tsv", ".csv", ".txt")) and os.path.sep in value:
-        return ("manifest", value)
-    return ("entry_id", value)
+    return parse_collection_value(value)
 
 
 def _generate_nextflow_workflow(
@@ -79,23 +78,13 @@ def _generate_nextflow_workflow(
 
     Returns (process_names, collection_inputs).
     """
-    spec_inputs = getattr(spec, "inputs", {}) or {}
     spec_outputs = getattr(spec, "outputs", {}) or {}
     command_template = getattr(spec, "command", "echo hello")
     tool_name = getattr(spec, "name", "tool")
 
-    collection_inputs: list[str] = []
-    single_inputs: list[str] = []
-    for input_name, input_def in spec_inputs.items():
-        is_collection = (
-            getattr(input_def, "collection", False)
-            if hasattr(input_def, "collection")
-            else False
-        )
-        if is_collection and input_name in input_mapping:
-            collection_inputs.append(input_name)
-        else:
-            single_inputs.append(input_name)
+    collection_inputs, single_inputs = split_collection_inputs(
+        spec, input_mapping
+    )
 
     # Build process name
     proc_name = tool_name.replace("-", "_")
@@ -114,7 +103,7 @@ def _generate_nextflow_workflow(
     output_decls: list[str] = []
     output_patterns: list[str] = []
     for idx, (out_name, out_def) in enumerate(spec_outputs.items()):
-        pattern = getattr(out_def, "pattern", "") or f"*.out"
+        pattern = getattr(out_def, "pattern", "") or "*.out"
         output_patterns.append(pattern)
         # Replace * with a Nextflow glob pattern
         if "*" in pattern:
@@ -170,12 +159,17 @@ def _generate_nextflow_workflow(
     else:
         # No collection inputs — single-item dispatch
         inputs_str = ", ".join(f"{name}_ch" for name in single_inputs)
-        workflow_call = f"    {proc_name}({inputs_str})" if inputs_str else f"    {proc_name}(input_ch)"
+        workflow_call = (
+            f"    {proc_name}({inputs_str})"
+            if inputs_str
+            else f"    {proc_name}(input_ch)"
+        )
 
     # Render the command template for Nextflow
     # In Nextflow, inputs are referenced as ${name}
+    all_input_names = collection_inputs + single_inputs
     rendered_command = command_template
-    for name in list(spec_inputs.keys()) + list(spec_outputs.keys()):
+    for name in all_input_names + list(spec_outputs.keys()):
         rendered_command = rendered_command.replace(
             f"{{{{ inputs.{name} }}}}", f"${{{name}}}"
         )
@@ -191,7 +185,9 @@ def _generate_nextflow_workflow(
         "// Scatter axis: " + (collection_inputs[0] if collection_inputs else "none"),
         "",
         "params.input = '.'",
-        "params." + (collection_inputs[0] if collection_inputs else "input") + "_pattern = './data/*'",
+        "params."
+        + (collection_inputs[0] if collection_inputs else "input")
+        + "_pattern = './data/*'",
     ]
     for name in single_inputs:
         lines.append(f"params.{name} = './data/{name}'")
@@ -295,7 +291,7 @@ class NextflowAdapter:
         a collection input. The container image is baked into the process's
         container directive.
         """
-        container_image = _resolve_container(spec)
+        container_image = resolve_container_from_spec(spec)
 
         import tempfile
         artifact_path = Path(tempfile.gettempdir()) / f"bioledger_nextflow_{int(time.time())}.nf"
@@ -304,13 +300,7 @@ class NextflowAdapter:
             spec, input_mapping, container_image, artifact_path
         )
 
-        spec_outputs = getattr(spec, "outputs", {}) or {}
-        output_patterns = [
-            getattr(od, "pattern", "") or "*.out"
-            for od in spec_outputs.values()
-        ]
-        if not output_patterns:
-            output_patterns = ["*.out"]
+        output_patterns = build_output_patterns(spec)
 
         return WorkflowHandle(
             executor="nextflow",

@@ -19,9 +19,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+from bioledger.core.engines.conda_derive import resolve_container_from_spec
 from bioledger.core.engines.config import SnakemakeEngineConfig
-from bioledger.core.engines.conda_derive import derive_container_image
-from bioledger.core.engines.protocol import RunHandle, RunStatus, WorkflowHandle
+from bioledger.core.engines.protocol import (
+    RunHandle,
+    RunStatus,
+    WorkflowHandle,
+    build_output_patterns,
+    parse_collection_value,
+    split_collection_inputs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,30 +44,21 @@ def _check_snakemake_available() -> str:
 
 
 def _resolve_container(spec: Any) -> str:
-    """Resolve the container image from spec.container or spec.conda_deps."""
-    container = getattr(spec, "container", "")
-    if container:
-        return container
-    conda_deps = getattr(spec, "conda_deps", [])
-    if conda_deps:
-        image = derive_container_image(conda_deps)
-        if image:
-            return image
-    return ""
+    """Resolve the container image from spec.container or spec.conda_deps.
+
+    .. deprecated:: Use ``resolve_container_from_spec`` from
+        ``conda_derive`` directly. Kept as a thin wrapper for
+        backward compatibility with ``builder.py`` imports.
+    """
+    return resolve_container_from_spec(spec)
 
 
 def _parse_collection_value(value: str) -> tuple[str, str]:
     """Determine the channel type for a collection input value.
 
-    Returns (kind, pattern) where kind is 'glob', 'manifest', or 'entry_id'.
+    .. deprecated:: Use ``parse_collection_value`` from ``protocol`` directly.
     """
-    if any(c in value for c in ("*", "?", "[", "]")):
-        return ("glob", value)
-    if value.endswith((".tsv", ".csv", ".txt")) and os.path.sep in value:
-        return ("manifest", value)
-    if len(value) >= 16 and all(c in "0123456789abcdef" for c in value.lower()):
-        return ("entry_id", value)
-    return ("glob", value)
+    return parse_collection_value(value)
 
 
 def _generate_snakefile(
@@ -77,24 +75,14 @@ def _generate_snakefile(
 
     Returns the list of rule names (step_inventory).
     """
-    spec_inputs = getattr(spec, "inputs", {}) or {}
     spec_outputs = getattr(spec, "outputs", {}) or {}
     command_template = getattr(spec, "command", "echo hello")
     tool_name = getattr(spec, "name", "tool")
 
     # Identify collection inputs (scatter axes) vs single-file inputs
-    collection_inputs: list[str] = []
-    single_inputs: list[str] = []
-    for input_name, input_def in spec_inputs.items():
-        is_collection = (
-            getattr(input_def, "collection", False)
-            if hasattr(input_def, "collection")
-            else False
-        )
-        if is_collection and input_name in input_mapping:
-            collection_inputs.append(input_name)
-        else:
-            single_inputs.append(input_name)
+    collection_inputs, single_inputs = split_collection_inputs(
+        spec, input_mapping
+    )
 
     # Determine the scatter wildcard from the first collection input
     scatter_wildcard = "item"
@@ -254,7 +242,7 @@ class SnakemakeAdapter:
         over a collection. The container image (from conda_deps auto-derive
         or explicit container) is baked into the rule's container: directive.
         """
-        container_image = _resolve_container(spec)
+        container_image = resolve_container_from_spec(spec)
 
         # Use a temporary artifact path — submit() will write it to work_dir
         import tempfile
@@ -264,14 +252,7 @@ class SnakemakeAdapter:
             spec, input_mapping, container_image, artifact_path
         )
 
-        # Determine output patterns from spec
-        spec_outputs = getattr(spec, "outputs", {}) or {}
-        output_patterns = [
-            getattr(od, "pattern", "") or f"*.out"
-            for od in spec_outputs.values()
-        ]
-        if not output_patterns:
-            output_patterns = ["*.out"]
+        output_patterns = build_output_patterns(spec)
 
         return WorkflowHandle(
             executor="snakemake",

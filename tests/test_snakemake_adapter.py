@@ -85,7 +85,7 @@ class TestResolveContainer:
     def test_conda_deps(self):
         spec = _MockSpec(container="", conda_deps=["samtools=1.17"])
         with patch(
-            "bioledger.core.engines.snakemake_adapter.derive_container_image",
+            "bioledger.core.engines.conda_derive.derive_container_image",
             return_value="quay.io/biocontainers/samtools:1.17--hdfd78af_0",
         ):
             assert _resolve_container(spec) == "quay.io/biocontainers/samtools:1.17--hdfd78af_0"
@@ -118,7 +118,7 @@ class TestSnakemakeGenerate:
         adapter = SnakemakeAdapter()
         spec = _MockSpec(container="", conda_deps=["samtools=1.17"])
         with patch(
-            "bioledger.core.engines.snakemake_adapter.derive_container_image",
+            "bioledger.core.engines.conda_derive.derive_container_image",
             return_value="quay.io/biocontainers/samtools:1.17--hdfd78af_0",
         ):
             handle = adapter.generate(

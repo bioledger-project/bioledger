@@ -1,8 +1,20 @@
 # ADR: Multi-Engine Execution Strategy
 
-**Status**: Accepted
+**Status**: Implemented (Phases 1, 2, 2b, 4, 5)
 **Date**: 2025-08-06
 **Supersedes**: None
+
+## Implementation Status
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| 0 | ✅ Done | Ledger/DAG foundations, toolspec executor enum, `ToolInput.collection` |
+| 1 | ✅ Done | `ExecutionAdapter` protocol, `WorkflowHandle`/`RunHandle`, dispatch, Docker facade |
+| 2 | ✅ Done | Snakemake reference adapter (local execution) |
+| 2b | ✅ Done | Fan-out mode, hardened translator, agent tools, output capping, CLI error messaging |
+| 3 | ⏸ Parked | Scheduler plugin support (no concrete demand) |
+| 4 | ✅ Done | Multi-engine RO-Crate (composite `mainEntity`) |
+| 5 | ✅ Done | Nextflow + Galaxy adapters |
 
 ## Context
 
@@ -90,9 +102,14 @@ existing stored entries to migrate.
 
 ### 11. Phase 4 RO-Crate `mainEntity` decision
 
-RO-Crate packaging uses a composite top-level workflow as `mainEntity`. The
-single fan-out entry is the workflow-level entity, with engine-native
-provenance referenced as a log.
+RO-Crate packaging uses a composite top-level workflow as `mainEntity` for
+multi-engine sessions. The `rocrate` library's `mainEntity` is single-value,
+so calling `add_workflow(main=True)` once per engine would silently overwrite
+prior ones. The composite `ContextEntity` references each engine's native
+artifact via `hasPart` and includes the dependency graph in its description.
+
+For single-engine sessions (docker/conda only), the existing Nextflow
+crystallization path is unchanged — `workflow.nf` as `mainEntity`.
 
 ## Consequences
 

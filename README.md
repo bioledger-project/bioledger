@@ -81,6 +81,7 @@ ISA-Tab to reproducible package without writing workflow syntax. See the [full w
 - **[Galaxy tool import](examples/galaxy_tool_import/)** — import existing Galaxy tool wrappers into BioLedger
 - **[CSV to ISA-Tab](examples/csv_to_isatab/)** — start from a plain samplesheet and convert to structured metadata
 - **[Variant calling on *L. donovani*](examples/variant_calling/)** — use the public library repos to discover tools and data, then run a full pipeline end-to-end
+- **Fan-out scatter** — run a tool across a collection of files using a workflow engine (requires `bioledger[snakemake]` or `bioledger[nextflow]`)
 
 ## Prerequisites
 
@@ -116,16 +117,22 @@ BIOLEDGER_DEFAULT_MODEL=google-gla:gemini-2.5-flash
 
 ### Docker (optional)
 
-Tool execution runs inside Docker containers. Install [Docker](https://docs.docker.com/get-docker/) if you plan to run bioinformatics tools through BioLedger. Conda support is planned as an alternative runtime for HPC and shared-cluster environments where Docker isn't available.
+Tool execution runs inside Docker containers. Install [Docker](https://docs.docker.com/get-docker/) if you plan to run bioinformatics tools through BioLedger. For HPC and shared-cluster environments where Docker isn't available, install a workflow engine extra (`bioledger[snakemake]` or `bioledger[nextflow]`) — engines handle conda/Apptainer/Singularity natively.
 
 ## Installation
 
 ```bash
-# Core only
+# Core only (Docker-based single-tool execution)
 pip install -e .
 
 # With all optional dependencies
 pip install -e ".[cli,isaforge,toolforge,analysis,crateforge,dev]"
+
+# With workflow engine support for fan-out operations
+pip install -e ".[snakemake]"           # Snakemake (pure Python)
+pip install -e ".[nextflow]"            # Nextflow (requires Java)
+pip install -e ".[galaxy]"              # Galaxy (planemo + bioblend)
+pip install -e ".[snakemake,nextflow,galaxy]"  # All three engines
 ```
 
 > **Schema dependencies**: BioLedger depends on `bioledger-toolspec-schema` and `bioledger-isatab-schema`, which live in sibling repositories. If you see `ModuleNotFoundError`, install them first in editable mode:
@@ -166,6 +173,7 @@ BioLedger is organized into **forges** — specialized modules that handle diffe
 | **ToolForge** | Tool spec management, translation (Galaxy ↔ Nextflow) |
 | **AnalysisForge** | Interactive analysis, tool execution, workflow crystallization |
 | **CrateForge** | RO-Crate packaging with full provenance |
+| **Engines** | Multi-engine execution adapters (Snakemake, Nextflow, Galaxy) |
 
 ---
 
@@ -283,9 +291,56 @@ bioledger package <session_id> --entry abc123 --entry def456 --output-dir ./my_c
 The resulting crate includes:
 
 - `ro-crate-metadata.json` — full provenance graph
-- `workflow.nf` — crystallized Nextflow workflow
+- `workflow.nf` — crystallized Nextflow workflow (single-engine sessions)
 - `ledger.json` — raw ledger entries
 - All input/output data files referenced by included entries
+
+For **multi-engine sessions** (entries from 2+ distinct executors, e.g. Docker + Snakemake), the crate uses a composite workflow entity as `mainEntity`:
+
+- Each engine's native artifact (`workflow.nf`, `*.smk`, `workflow.ga`) is included as a supplementary file
+- A synthesized composite workflow entity references them via `hasPart`
+- The dependency graph from the ledger is embedded in the composite entity's description
+
+---
+
+### Multi-Engine Execution
+
+BioLedger supports three workflow engines for fan-out (scatter) operations and native workflow toolspecs. Each engine is an optional pip extra — the core package works with Docker only.
+
+| Engine | Install Extra | Requires |
+|--------|--------------|----------|
+| Snakemake | `bioledger[snakemake]` | Python (pure) |
+| Nextflow | `bioledger[nextflow]` | Java/JVM |
+| Galaxy | `bioledger[galaxy]` | planemo (local) or bioblend (remote) |
+
+```bash
+# Install one or more engine extras
+pip install -e ".[snakemake]"
+pip install -e ".[snakemake,nextflow,galaxy]"
+```
+
+#### Fan-Out (Scatter)
+
+When a tool spec has a `collection` input (e.g. `bam: ToolInput(collection=True)`), BioLedger can scatter the tool across a collection of files using a workflow engine:
+
+```
+you> run samtools_sort on all the bam files in data/
+assistant> Suggested: samtools_sort (via snakemake)
+           Scattering over: data/*.bam
+           Run this tool? [y/N]: y
+assistant> Submitted fan-out via snakemake as job abc123.
+           Type 'status' to check progress.
+```
+
+The agent detects collection-eligible inputs, selects an available engine, generates a parameterized workflow (Snakefile / Nextflow DSL2 / Galaxy .ga), and submits it. All paths are parameterized via config — no hardcoded paths in generated workflows.
+
+#### Engine Auto-Detection
+
+When no engine is specified, BioLedger auto-detects in preference order: Nextflow → Snakemake → Galaxy. If none are installed, the error message includes install instructions.
+
+#### Galaxy Tool-Availability Check
+
+When using Galaxy, the adapter queries the Galaxy instance's tool panel before submission. If the tool isn't available, it errors with a clear message — no Docker fallback.
 
 ---
 
@@ -319,7 +374,7 @@ Setting `BIOLEDGER_DEFAULT_MODEL` switches the provider for all primary tasks. U
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -v
+pytest tests/ -v          # 471 tests
 ruff check src/ tests/
 mypy src/bioledger
 ```

@@ -61,7 +61,7 @@ class TestParseCollectionValue:
         assert kind == "manifest"
 
     def test_entry_id(self):
-        kind, pattern = _parse_collection_value("abc123def456")
+        kind, pattern = _parse_collection_value("abc123def456abcd")
         assert kind == "entry_id"
 
 
@@ -73,7 +73,7 @@ class TestResolveContainer:
     def test_conda_deps(self):
         spec = _MockSpec(container="", conda_deps=["samtools=1.17"])
         with patch(
-            "bioledger.core.engines.nextflow_adapter.derive_container_image",
+            "bioledger.core.engines.conda_derive.derive_container_image",
             return_value="quay.io/biocontainers/samtools:1.17--hdfd78af_0",
         ):
             assert _resolve_container(spec) == "quay.io/biocontainers/samtools:1.17--hdfd78af_0"

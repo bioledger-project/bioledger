@@ -18,6 +18,7 @@ to/from JSON directly so they survive process restarts alongside the
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -146,3 +147,53 @@ class ExecutionAdapter(Protocol):
         returns a terminal state; idempotent.
         """
         ...
+
+
+def parse_collection_value(value: str) -> tuple[str, str]:
+    """Determine the channel type for a collection input value.
+
+    Returns (kind, pattern) where kind is 'glob', 'manifest', or 'entry_id'.
+    A 16+ char hex string is treated as a ledger entry ID; anything else
+    without glob characters but with a path separator and list-file extension
+    is a manifest; all other values default to 'glob'.
+    """
+    if any(c in value for c in ("*", "?", "[", "]")):
+        return ("glob", value)
+    if value.endswith((".tsv", ".csv", ".txt")) and os.path.sep in value:
+        return ("manifest", value)
+    if len(value) >= 16 and all(c in "0123456789abcdef" for c in value.lower()):
+        return ("entry_id", value)
+    return ("glob", value)
+
+
+def split_collection_inputs(
+    spec: Any, input_mapping: dict[str, str]
+) -> tuple[list[str], list[str]]:
+    """Split spec inputs into (collection_inputs, single_inputs).
+
+    Collection inputs are those with ``collection=True`` that also appear
+    in ``input_mapping``. Single inputs are the rest.
+    """
+    spec_inputs = getattr(spec, "inputs", {}) or {}
+    collection_inputs: list[str] = []
+    single_inputs: list[str] = []
+    for input_name, input_def in spec_inputs.items():
+        is_collection = getattr(input_def, "collection", False)
+        if is_collection and input_name in input_mapping:
+            collection_inputs.append(input_name)
+        else:
+            single_inputs.append(input_name)
+    return collection_inputs, single_inputs
+
+
+def build_output_patterns(spec: Any) -> list[str]:
+    """Extract output patterns from a spec's outputs dict.
+
+    Falls back to ["*.out"] if no outputs are defined.
+    """
+    spec_outputs = getattr(spec, "outputs", {}) or {}
+    patterns = [
+        getattr(od, "pattern", "") or "*.out"
+        for od in spec_outputs.values()
+    ]
+    return patterns if patterns else ["*.out"]

@@ -6,9 +6,9 @@ import pytest
 
 from bioledger.core.engines.config import EnginesConfig
 from bioledger.core.engines.dispatch import (
+    _detect_installed_engine,
     dispatch,
     resolve_engine_for_fanout,
-    _detect_installed_engine,
 )
 from bioledger.core.engines.docker_facade import DockerRunnerFacade
 from bioledger.core.engines.protocol import (

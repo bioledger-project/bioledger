@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from rocrate.model import ContextEntity
 from rocrate.rocrate import ROCrate
 
 from bioledger.ledger.models import EntryKind, LedgerEntry, LedgerSession
+
+logger = logging.getLogger(__name__)
 
 
 def _detect_executors(entries: list[LedgerEntry]) -> set[str]:
@@ -141,10 +144,8 @@ def _add_engine_artifact(
 
 def _generate_snakefile_from_entry(entry: LedgerEntry) -> str | None:
     """Generate a Snakefile representation from a fan-out ledger entry."""
-    from bioledger.core.engines.snakemake_adapter import (
-        _generate_snakefile,
-        _resolve_container,
-    )
+    from bioledger.core.engines.conda_derive import resolve_container_from_spec
+    from bioledger.core.engines.snakemake_adapter import _generate_snakefile
     from bioledger.toolspec.models import ExecutionSpec
 
     spec_snapshot = entry.tool_spec_snapshot or {}
@@ -157,7 +158,7 @@ def _generate_snakefile_from_entry(entry: LedgerEntry) -> str | None:
         return None
 
     input_mapping = entry.container.input_mapping if entry.container else {}
-    container_image = _resolve_container(spec)
+    container_image = resolve_container_from_spec(spec)
 
     with tempfile.NamedTemporaryFile(suffix=".smk", delete=False) as tmp:
         artifact_path = Path(tmp.name)
@@ -165,7 +166,8 @@ def _generate_snakefile_from_entry(entry: LedgerEntry) -> str | None:
     try:
         _generate_snakefile(spec, input_mapping, container_image, artifact_path)
         return artifact_path.read_text()
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to generate Snakefile from entry %s: %s", entry.id, e)
         return None
     finally:
         artifact_path.unlink(missing_ok=True)

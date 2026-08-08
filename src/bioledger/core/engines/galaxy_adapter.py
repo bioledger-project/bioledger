@@ -27,9 +27,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from bioledger.core.engines.conda_derive import resolve_container_from_spec
 from bioledger.core.engines.config import GalaxyEngineConfig
-from bioledger.core.engines.conda_derive import derive_container_image
-from bioledger.core.engines.protocol import RunHandle, RunStatus, WorkflowHandle
+from bioledger.core.engines.protocol import (
+    RunHandle,
+    RunStatus,
+    WorkflowHandle,
+    build_output_patterns,
+    split_collection_inputs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +51,12 @@ def _check_planemo_available() -> str:
 
 
 def _resolve_container(spec: Any) -> str:
-    """Resolve the container image from spec.container or spec.conda_deps."""
-    container = getattr(spec, "container", "")
-    if container:
-        return container
-    conda_deps = getattr(spec, "conda_deps", [])
-    if conda_deps:
-        image = derive_container_image(conda_deps)
-        if image:
-            return image
-    return ""
+    """Resolve the container image from spec.container or spec.conda_deps.
+
+    .. deprecated:: Use ``resolve_container_from_spec`` from
+        ``conda_derive`` directly.
+    """
+    return resolve_container_from_spec(spec)
 
 
 def _generate_galaxy_workflow(
@@ -66,23 +68,13 @@ def _generate_galaxy_workflow(
 
     Returns (step_names, collection_inputs).
     """
-    spec_inputs = getattr(spec, "inputs", {}) or {}
     spec_outputs = getattr(spec, "outputs", {}) or {}
     tool_name = getattr(spec, "name", "tool")
-    container_image = _resolve_container(spec)
+    container_image = resolve_container_from_spec(spec)
 
-    collection_inputs: list[str] = []
-    single_inputs: list[str] = []
-    for input_name, input_def in spec_inputs.items():
-        is_collection = (
-            getattr(input_def, "collection", False)
-            if hasattr(input_def, "collection")
-            else False
-        )
-        if is_collection and input_name in input_mapping:
-            collection_inputs.append(input_name)
-        else:
-            single_inputs.append(input_name)
+    collection_inputs, single_inputs = split_collection_inputs(
+        spec, input_mapping
+    )
 
     # Build Galaxy workflow JSON
     tool_id = tool_name
@@ -249,13 +241,7 @@ class GalaxyAdapter:
             spec, input_mapping, artifact_path
         )
 
-        spec_outputs = getattr(spec, "outputs", {}) or {}
-        output_patterns = [
-            getattr(od, "pattern", "") or "*.out"
-            for od in spec_outputs.values()
-        ]
-        if not output_patterns:
-            output_patterns = ["*.out"]
+        output_patterns = build_output_patterns(spec)
 
         return WorkflowHandle(
             executor="galaxy",

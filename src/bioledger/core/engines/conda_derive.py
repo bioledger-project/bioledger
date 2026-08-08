@@ -18,10 +18,30 @@ into generated workflow process/rule text at ``generate()`` time.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from bioledger_toolspec_schema.containers import lookup_biocontainers_tag_sync
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_container_from_spec(spec: Any) -> str:
+    """Resolve the container image from a spec's container or conda_deps.
+
+    If ``spec.container`` is set, returns it directly. Otherwise, tries
+    to auto-derive from ``spec.conda_deps`` via ``derive_container_image``.
+
+    Returns "" if no container can be resolved.
+    """
+    container = getattr(spec, "container", "")
+    if container:
+        return container
+    conda_deps = getattr(spec, "conda_deps", [])
+    if conda_deps:
+        image = derive_container_image(conda_deps)
+        if image:
+            return image
+    return ""
 
 
 def _parse_package_spec(spec: str) -> tuple[str, str]:
