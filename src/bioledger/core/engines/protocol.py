@@ -70,6 +70,35 @@ class RunHandle(BaseModel):
     work_dir: Path  # where the run executes
     submitted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: str = "running"  # "running", "completed", "failed"
+    process_start_time: float | None = None  # psutil create_time for PID recycling guard
+    metadata: dict[str, Any] = Field(default_factory=dict)  # engine-specific extras
+
+
+def _is_process_alive(pid: int, expected_start_time: float | None = None) -> bool:
+    """Check if a process is alive, with optional PID-recycling guard.
+
+    Uses ``os.kill(pid, 0)`` for the basic check, then verifies the process
+    start time via psutil if an ``expected_start_time`` is provided.
+    Falls back to ``os.kill`` only if psutil is unavailable.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    if expected_start_time is not None:
+        try:
+            import psutil
+        except ImportError:
+            pass
+        else:
+            try:
+                if psutil.Process(pid).create_time() != expected_start_time:
+                    return False
+            except psutil.NoSuchProcess:
+                pass
+    return True
 
 
 @runtime_checkable

@@ -91,6 +91,15 @@ class ToolRunRequest(BaseModel):
             "single-tool Docker runs."
         ),
     )
+    discovered_source: str | None = Field(
+        default=None,
+        description=(
+            "Optional: if the tool was discovered via tool search, "
+            "set this to 'toolshed:<owner>/<repo>' or "
+            "'nfcore:<subdirectory>' to trigger the discovered-tool "
+            "execution path. Leave None for tools already in the local store."
+        ),
+    )
 
     def params_as_dict(self) -> dict[str, str]:
         """Convert suggested_params list back to a dict."""
@@ -315,6 +324,59 @@ class AnalysisForgeAgent:
             whether a specific engine (nextflow/snakemake/galaxy) can
             be used for a fan-out or workflow run."""
             return self._build_engine_status()
+
+        @self._chat_agent.tool
+        def search_toolshed(
+            ctx: RunContext[ForgeDeps], query: str
+        ) -> str:
+            """Search the Galaxy Tool Shed for tools matching the query.
+            Use this when the user asks to find a tool that is not locally
+            installed. Returns tool names, descriptions, and repo info.
+            The user can then run a discovered tool by setting
+            discovered_source='toolshed:<owner>/<repo>'."""
+            try:
+                from bioledger.core.engines.toolshed_search import (
+                    search_toolshed as _search,
+                )
+
+                results = _search(query)
+                if not results:
+                    return f"No Tool Shed results for '{query}'."
+                lines = []
+                for r in results:
+                    lines.append(
+                        f"  {r.tool_id}: {r.name} — {r.description} "
+                        f"(repo: {r.repo_owner}/{r.repo_name})"
+                    )
+                return "Tool Shed results:\n" + "\n".join(lines)
+            except RuntimeError as e:
+                return f"Tool Shed search unavailable: {e}"
+
+        @self._chat_agent.tool
+        def search_nfcore(
+            ctx: RunContext[ForgeDeps], query: str
+        ) -> str:
+            """Search nf-core/modules for modules matching the query.
+            Use this when the user asks to find an nf-core module that is
+            not locally installed. Returns module names, subdirectories,
+            and descriptions. The user can then run a discovered module by
+            setting discovered_source='nfcore:<subdirectory>'."""
+            try:
+                from bioledger.core.engines.nfcore_search import (
+                    search_nfcore as _search,
+                )
+
+                results = _search(query)
+                if not results:
+                    return f"No nf-core results for '{query}'."
+                lines = []
+                for r in results:
+                    lines.append(
+                        f"  {r.name} ({r.subdirectory}): {r.description}"
+                    )
+                return "nf-core results:\n" + "\n".join(lines)
+            except RuntimeError as e:
+                return f"nf-core search unavailable: {e}"
 
         # Tool selection agent — structured output
         self._tool_select_agent = make_agent(
@@ -802,3 +864,98 @@ class AnalysisForgeAgent:
         self.store.save_session(self.session)
 
         return entry, handle
+
+    def submit_discovered(
+        self,
+        tool_name: str,
+        discovered_source: str,
+        input_mapping: dict[str, str],
+        params: dict[str, Any],
+        parent_id: str | None = None,
+    ) -> tuple[LedgerEntry, Any]:
+        """Submit a discovered tool (from Tool Shed or nf-core) for execution.
+
+        Downloads the tool, parses it into an ExecutionSpec, then dispatches
+        to the appropriate engine adapter via submit_spec().
+
+        discovered_source format:
+          - 'toolshed:<owner>/<repo>' — Galaxy Tool Shed
+          - 'nfcore:<subdirectory>' — nf-core modules
+        """
+        from bioledger.core.engines.dispatch import _get_engine_adapter
+        from bioledger.forges.analysisforge.executor import get_session_dir
+
+        session_dir = get_session_dir(
+            self.config.home_dir, self.session.id
+        )
+
+        # Parse the source string
+        if discovered_source.startswith("toolshed:"):
+            repo = discovered_source[len("toolshed:"):]
+            owner, repo_name = repo.split("/", 1)
+            from bioledger.core.engines.toolshed_search import (
+                download_tool,
+                parse_tool_to_spec,
+            )
+
+            work_dir = session_dir / f"discovered_{owner}_{repo_name}"
+            tool_dir = download_tool(owner, repo_name, dest_dir=work_dir / "tool")
+            spec = parse_tool_to_spec(tool_dir)
+            engine = "galaxy"
+        elif discovered_source.startswith("nfcore:"):
+            subdir = discovered_source[len("nfcore:"):]
+            from bioledger.core.engines.nfcore_search import (
+                download_module,
+                parse_module_to_spec,
+            )
+
+            work_dir = session_dir / f"discovered_nfcore_{subdir.replace('/', '_')}"
+            module_dir = download_module(subdir, dest_dir=work_dir / "module")
+            spec = parse_module_to_spec(module_dir)
+            engine = "nextflow"
+        else:
+            raise ValueError(
+                f"Unknown discovered_source format: {discovered_source}"
+            )
+
+        # Get the engine adapter
+        engines_cfg = self.config.engines if self.config else None
+        adapter = _get_engine_adapter(engine, engines_cfg)
+
+        # Create LedgerEntry
+        entry = LedgerEntry(
+            kind=EntryKind.TOOL_RUN,
+            tool_spec_name=spec.name,
+            tool_spec_snapshot=spec.model_dump(),
+            container=ContainerInfo(
+                image=spec.container,
+                command=[],
+                input_mapping=input_mapping,
+            ),
+            params=params,
+            parent_id=parent_id,
+            run_status="running",
+            run_handle_id="",
+            executor=engine,
+            notes=f"Discovered tool from {discovered_source}",
+        )
+        self.session.add(entry)
+
+        # Submit via submit_spec()
+        submit_kwargs: dict[str, Any] = {
+            "spec": spec,
+            "input_mapping": input_mapping,
+            "params": params,
+            "work_dir": work_dir / f"run_{entry.id}",
+        }
+        # Pass tool_dir for Galaxy (Tool Shed) discovered tools
+        if engine == "galaxy":
+            submit_kwargs["tool_dir"] = tool_dir
+        elif engine == "nextflow":
+            submit_kwargs["module_dir"] = module_dir
+        run_handle = adapter.submit_spec(**submit_kwargs)
+
+        entry.run_handle_id = run_handle.run_id
+        self.store.save_session(self.session)
+
+        return entry, run_handle

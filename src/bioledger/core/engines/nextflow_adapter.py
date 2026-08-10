@@ -14,8 +14,8 @@ found" error at invocation time, not import time.
 
 from __future__ import annotations
 
+import json
 import logging
-import os
 import shutil
 import subprocess
 import time
@@ -28,6 +28,7 @@ from bioledger.core.engines.protocol import (
     RunHandle,
     RunStatus,
     WorkflowHandle,
+    _is_process_alive,
     build_output_patterns,
     parse_collection_value,
     split_collection_inputs,
@@ -138,24 +139,14 @@ def _generate_nextflow_workflow(
 
     # Workflow call: scatter over first collection input
     if collection_inputs:
-        scatter_name = collection_inputs[0]
-        # The process receives the scatter channel plus single inputs
-        process_inputs = [f"{scatter_name}_ch"]
-        for name in single_inputs:
-            process_inputs.append(f"{name}_ch")
-        # Use combine to pair single inputs with each scatter item
-        if len(single_inputs) == 1:
-            workflow_call = (
-                f"    {proc_name}({scatter_name}_ch.combine({single_inputs[0]}_ch))"
-            )
-        elif len(single_inputs) == 0:
-            workflow_call = f"    {proc_name}({scatter_name}_ch)"
-        else:
-            # Multiple single inputs: combine them first
-            combined = single_inputs[0] + "_ch"
-            for name in single_inputs[1:]:
+        scatter_ch = f"{collection_inputs[0]}_ch"
+        if single_inputs:
+            combined = scatter_ch
+            for name in single_inputs:
                 combined += f".combine({name}_ch)"
-            workflow_call = f"    {proc_name}({scatter_name}_ch.combine({combined}))"
+            workflow_call = f"    {proc_name}({combined})"
+        else:
+            workflow_call = f"    {proc_name}({scatter_ch})"
     else:
         # No collection inputs — single-item dispatch
         inputs_str = ", ".join(f"{name}_ch" for name in single_inputs)
@@ -250,8 +241,6 @@ class NextflowAdapter:
         Collection inputs get a ``<name>_pattern`` key with the glob pattern.
         Single inputs get a ``<name>`` key with the path.
         """
-        import json
-
         coll = set(collection_inputs or [])
         result: dict[str, Any] = {}
         for k, v in {**input_mapping, **params}.items():
@@ -265,18 +254,121 @@ class NextflowAdapter:
         input_mapping: dict[str, str],
         params: dict[str, Any],
         work_dir: Path,
+        module_dir: Path | None = None,
     ) -> RunHandle:
         """Run a single workflow toolspec via nextflow.
 
-        For workflow toolspecs with executors: [nextflow], the toolspec's
-        command template invokes nextflow directly (e.g. ``nextflow run
-        nf-core/rnaseq ...``). This is coarse provenance — one LedgerEntry
-        for the whole run.
+        Generates a single-process Nextflow workflow from the spec using
+        ``to_nextflow_process()``, wraps it with a ``workflow { ... }`` block
+        that creates channels from ``input_mapping`` paths, and launches
+        ``nextflow run`` as a subprocess.
+
+        If ``module_dir`` is provided (Phase 3B: downloaded nf-core module),
+        the module's ``main.nf`` is used directly instead of generating from
+        the spec. A wrapper workflow is still created to bind inputs.
         """
-        raise NotImplementedError(
-            "NextflowAdapter.submit_spec will be wired when dispatch() is "
-            "unified with the agent path. The toolspec's command template "
-            "handles single-item nextflow runs directly."
+        from bioledger.forges.toolforge.translators.nextflow import (
+            to_nextflow_process,
+        )
+
+        work_dir = Path(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate the process block — use downloaded module if available
+        if module_dir and (module_dir / "main.nf").exists():
+            process_block = (module_dir / "main.nf").read_text()
+        else:
+            process_block = to_nextflow_process(spec)
+
+        # Build channel declarations and workflow call
+        channel_lines = []
+        input_names = list(spec.inputs.keys())
+        for name in input_names:
+            channel_lines.append(
+                f"    {name}_ch = Channel.fromPath(params.{name})"
+            )
+        if not input_names:
+            channel_lines.append("    input_ch = Channel.fromPath(params.input)")
+
+        inputs_str = ", ".join(f"{name}_ch" for name in input_names) or "input_ch"
+
+        # Build params defaults from input_mapping
+        params_lines = []
+        for name, path in input_mapping.items():
+            params_lines.append(f"params.{name} = '{path}'")
+        for name, val in params.items():
+            if isinstance(val, str):
+                params_lines.append(f"params.{name} = '{val}'")
+            elif isinstance(val, bool):
+                params_lines.append(f"params.{name} = {str(val).lower()}")
+            else:
+                params_lines.append(f"params.{name} = {val}")
+
+        # Assemble the complete main.nf
+        params_text = "\n".join(params_lines)
+        channels_text = "\n".join(channel_lines)
+        main_nf = (
+            f"// Auto-generated by NextflowAdapter.submit_spec()\n"
+            f"{params_text}\n\n"
+            f"{process_block}\n\n"
+            f"workflow {{\n"
+            f"{channels_text}\n"
+            f"    {spec.name}({inputs_str})\n"
+            f"}}\n"
+        )
+
+        # Write main.nf
+        nf_path = work_dir / "main.nf"
+        nf_path.write_text(main_nf)
+
+        # Write params.json
+        params_path = work_dir / "params.json"
+        all_params = {**input_mapping, **params}
+        params_path.write_text(json.dumps(all_params, indent=2))
+
+        # Build the nextflow command
+        cmd = [
+            self.executable,
+            "run", str(nf_path),
+            "-params-file", str(params_path),
+            "-work-dir", str(work_dir / "work"),
+        ]
+        if self._config.config_file:
+            cmd.extend(["-c", str(self._config.config_file)])
+        cmd.extend(self._config.extra_args)
+
+        # Launch as subprocess (non-blocking)
+        log_path = work_dir / "nextflow.log"
+        log_file = open(log_path, "w")
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(work_dir),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+        run_id = str(proc.pid)
+
+        # Record process start time for PID recycling guard
+        process_start_time = None
+        try:
+            import psutil
+
+            process_start_time = psutil.Process(proc.pid).create_time()
+        except Exception:
+            pass
+
+        return RunHandle(
+            executor="nextflow",
+            run_id=run_id,
+            entry_id="",
+            work_dir=work_dir,
+            submitted_at=time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            ),
+            status="running",
+            process_start_time=process_start_time,
         )
 
     def generate(
@@ -369,6 +461,15 @@ class NextflowAdapter:
 
         run_id = str(proc.pid)
 
+        # Record process start time for PID recycling guard
+        process_start_time = None
+        try:
+            import psutil
+
+            process_start_time = psutil.Process(proc.pid).create_time()
+        except Exception:
+            pass
+
         return RunHandle(
             executor="nextflow",
             run_id=run_id,
@@ -378,6 +479,7 @@ class NextflowAdapter:
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
             ),
             status="running",
+            process_start_time=process_start_time,
         )
 
     def poll(self, run_handle: RunHandle) -> RunStatus | None:
@@ -387,12 +489,8 @@ class NextflowAdapter:
         except ValueError:
             return None
 
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _is_process_alive(pid, run_handle.process_start_time):
             return self._check_completion(run_handle)
-        except PermissionError:
-            return None
 
         # Still running — try to get progress from .nextflow.log
         log_path = Path(run_handle.work_dir) / "nextflow.log"

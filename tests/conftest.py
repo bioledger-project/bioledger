@@ -57,28 +57,6 @@ def sample_tool_spec(sample_exec_spec: ExecutionSpec) -> ToolSpec:
 
 
 @pytest.fixture
-def sample_galaxy_xml() -> str:
-    """Minimal Galaxy tool XML for import testing."""
-    return """\
-<?xml version='1.0' encoding='us-ascii'?>
-<tool id="fastqc" name="FastQC" version="0.11.9">
-  <description>Read Quality reports</description>
-  <requirements>
-    <container type="docker">quay.io/biocontainers/fastqc:0.11.9--0</container>
-  </requirements>
-  <command detect_errors="exit_code">fastqc $reads -o $report -t $threads</command>
-  <inputs>
-    <param name="reads" type="data" format="fastq" label="Input reads" />
-    <param name="threads" type="integer" value="4" min="1" max="32" label="Threads" />
-  </inputs>
-  <outputs>
-    <data name="report" format="html" label="QC Report" />
-  </outputs>
-</tool>
-"""
-
-
-@pytest.fixture
 def sample_nextflow_dsl2() -> str:
     """Minimal Nextflow DSL2 process for import testing."""
     return """\

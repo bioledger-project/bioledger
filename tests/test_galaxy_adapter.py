@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from bioledger.core.engines.config import GalaxyEngineConfig
 from bioledger.core.engines.dispatch import _adapter_registry, dispatch
@@ -141,43 +141,54 @@ class TestGalaxyToolAvailability:
 
 
 class TestGalaxyPoll:
-    def test_poll_planemo_invalid_pid(self):
-        adapter = GalaxyAdapter()
-        handle = RunHandle(
-            executor="galaxy",
-            run_id="not-a-pid",
-            entry_id="",
-            work_dir=Path("/tmp"),
-        )
-        assert adapter.poll(handle) is None
-
-    def test_poll_planemo_completed(self, tmp_path):
-        adapter = GalaxyAdapter()
-        log_path = tmp_path / "galaxy.log"
-        log_path.write_text("Serving on 0.0.0.0\nShutting down\n")
-        handle = RunHandle(
-            executor="galaxy",
-            run_id="999999999",
-            entry_id="",
-            work_dir=tmp_path,
-        )
-        result = adapter.poll(handle)
+    def test_poll_planemo_invocation_completed(self):
+        """Planemo mode now uses bioblend to poll invocation state."""
+        adapter = GalaxyAdapter()  # default mode=planemo
+        mock_gi = MagicMock()
+        mock_gi.workflows.show_invocation.return_value = {"state": "done"}
+        with patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi):
+            handle = RunHandle(
+                executor="galaxy",
+                run_id="inv-123",
+                entry_id="",
+                work_dir=Path("/tmp"),
+            )
+            result = adapter.poll(handle)
         assert result is not None
         assert result.state == "completed"
+        mock_gi.workflows.show_invocation.assert_called_once_with("inv-123")
 
-    def test_poll_planemo_failed(self, tmp_path):
+    def test_poll_planemo_invocation_failed(self):
+        """Planemo mode polls invocation state via bioblend."""
         adapter = GalaxyAdapter()
-        log_path = tmp_path / "galaxy.log"
-        log_path.write_text("Error: something went wrong\n")
-        handle = RunHandle(
-            executor="galaxy",
-            run_id="999999999",
-            entry_id="",
-            work_dir=tmp_path,
-        )
-        result = adapter.poll(handle)
+        mock_gi = MagicMock()
+        mock_gi.workflows.show_invocation.return_value = {"state": "failed"}
+        with patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi):
+            handle = RunHandle(
+                executor="galaxy",
+                run_id="inv-456",
+                entry_id="",
+                work_dir=Path("/tmp"),
+            )
+            result = adapter.poll(handle)
         assert result is not None
         assert result.state == "failed"
+
+    def test_poll_planemo_invocation_running(self):
+        """Planemo mode polls invocation state via bioblend."""
+        adapter = GalaxyAdapter()
+        mock_gi = MagicMock()
+        mock_gi.workflows.show_invocation.return_value = {"state": "running"}
+        with patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi):
+            handle = RunHandle(
+                executor="galaxy",
+                run_id="inv-789",
+                entry_id="",
+                work_dir=Path("/tmp"),
+            )
+            result = adapter.poll(handle)
+        assert result is not None
+        assert result.state == "running"
 
     def test_poll_remote_completed(self):
         config = GalaxyEngineConfig(
@@ -217,33 +228,51 @@ class TestGalaxyPoll:
 
 
 class TestGalaxyCollect:
-    def test_collect_planemo_from_galaxy_dir(self, tmp_path):
-        adapter = GalaxyAdapter()
-        galaxy_dir = tmp_path / "galaxy"
-        galaxy_dir.mkdir()
-        (galaxy_dir / "output1.dat").write_text("result1")
-        (galaxy_dir / "output2.dat").write_text("result2")
-        handle = RunHandle(
-            executor="galaxy",
-            run_id="123",
-            entry_id="",
-            work_dir=tmp_path,
-        )
-        outputs = adapter.collect(handle)
-        assert len(outputs) == 2
-        names = {o["name"] for o in outputs}
-        assert "output1.dat" in names
-        assert "output2.dat" in names
+    def test_collect_planemo_via_bioblend(self):
+        """Planemo mode now collects outputs via bioblend."""
+        adapter = GalaxyAdapter()  # default mode=planemo
+        mock_gi = MagicMock()
+        mock_gi.workflows.show_invocation.return_value = {
+            "history_id": "hist-123"
+        }
+        mock_gi.histories.show_history.return_value = [
+            {"state": "ok", "file_name": "/tmp/out1.bam", "name": "out1", "file_size": 100},
+            {"state": "error", "file_name": "/tmp/out2.bam", "name": "out2", "file_size": 50},
+        ]
+        with (
+            patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi),
+            patch.object(adapter, "_shutdown_planemo") as mock_shutdown,
+        ):
+            handle = RunHandle(
+                executor="galaxy",
+                run_id="inv-123",
+                entry_id="",
+                work_dir=Path("/tmp"),
+            )
+            outputs = adapter.collect(handle)
+        assert len(outputs) == 1
+        assert outputs[0]["name"] == "out1"
+        mock_shutdown.assert_called_once_with(handle)
 
-    def test_collect_planemo_empty(self, tmp_path):
+    def test_collect_planemo_empty(self):
+        """Planemo mode with no outputs returns empty list."""
         adapter = GalaxyAdapter()
-        handle = RunHandle(
-            executor="galaxy",
-            run_id="123",
-            entry_id="",
-            work_dir=tmp_path,
-        )
-        outputs = adapter.collect(handle)
+        mock_gi = MagicMock()
+        mock_gi.workflows.show_invocation.return_value = {
+            "history_id": "hist-456"
+        }
+        mock_gi.histories.show_history.return_value = []
+        with (
+            patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi),
+            patch.object(adapter, "_shutdown_planemo"),
+        ):
+            handle = RunHandle(
+                executor="galaxy",
+                run_id="inv-456",
+                entry_id="",
+                work_dir=Path("/tmp"),
+            )
+            outputs = adapter.collect(handle)
         assert outputs == []
 
     def test_collect_remote_via_bioblend(self):
@@ -285,3 +314,59 @@ class TestGalaxyDispatch:
         spec = _MockSpec(executors=["docker"])
         adapter = dispatch(spec, engine="galaxy")
         assert isinstance(adapter, GalaxyAdapter)
+
+
+class TestGalaxySubmitSpec:
+    def test_submit_spec_delegates_to_generate_and_submit(self, tmp_path):
+        """submit_spec() should call generate() then submit()."""
+        adapter = GalaxyAdapter()
+        spec = _MockSpec()
+        mock_handle = MagicMock()
+        mock_run_handle = RunHandle(
+            executor="galaxy",
+            run_id="inv-123",
+            entry_id="",
+            work_dir=tmp_path,
+        )
+        with (
+            patch.object(adapter, "generate", return_value=mock_handle) as mock_gen,
+            patch.object(adapter, "submit", return_value=mock_run_handle) as mock_sub,
+        ):
+            result = adapter.submit_spec(
+                spec=spec,
+                input_mapping={"input": "/data/file.bam"},
+                params={"threads": "4"},
+                work_dir=tmp_path,
+            )
+        mock_gen.assert_called_once_with(spec, {"input": "/data/file.bam"})
+        mock_sub.assert_called_once_with(
+            mock_handle, {"input": "/data/file.bam"}, {"threads": "4"}, tmp_path
+        )
+        assert result == mock_run_handle
+
+    def test_submit_spec_passes_tool_dir_to_metadata(self, tmp_path):
+        """submit_spec() with tool_dir should set it in handle metadata."""
+        adapter = GalaxyAdapter()
+        spec = _MockSpec()
+        mock_handle = MagicMock()
+        mock_handle.metadata = {}
+        mock_run_handle = RunHandle(
+            executor="galaxy",
+            run_id="inv-456",
+            entry_id="",
+            work_dir=tmp_path,
+        )
+        tool_dir = tmp_path / "downloaded_tool"
+        tool_dir.mkdir()
+        with (
+            patch.object(adapter, "generate", return_value=mock_handle),
+            patch.object(adapter, "submit", return_value=mock_run_handle),
+        ):
+            adapter.submit_spec(
+                spec=spec,
+                input_mapping={"input": "/data/file.bam"},
+                params={"threads": "4"},
+                work_dir=tmp_path,
+                tool_dir=tool_dir,
+            )
+        assert mock_handle.metadata["tool_dir"] == str(tool_dir)

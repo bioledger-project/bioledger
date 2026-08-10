@@ -21,6 +21,7 @@ dependencies = [
     "rich>=13.0",
     "bioledger-toolspec-schema>=0.1",
     "bioledger-isatab-schema>=0.1",
+    "psutil>=5.5",
 ]
 
 [project.optional-dependencies]

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import subprocess
 import time
@@ -186,6 +185,24 @@ class GalaxyAdapter:
         )
         return self._bioblend_client
 
+    def _get_galaxy_instance(self):
+        """Get a bioblend GalaxyInstance for either planemo or remote mode.
+
+        In planemo mode, connects to the local planemo server at localhost:8765.
+        In remote mode, connects to the configured Galaxy server.
+        """
+        if self._config.mode == "planemo":
+            try:
+                from bioblend.galaxy import GalaxyInstance
+            except ImportError:
+                raise RuntimeError(
+                    "bioblend is not installed. "
+                    "Install with: pip install bioledger[galaxy]"
+                )
+            return GalaxyInstance(url="http://localhost:8765", key="")
+        else:
+            return self._get_bioblend_client()
+
     def _check_tool_availability(self, tool_id: str) -> None:
         """Check if a tool is available in the Galaxy instance.
 
@@ -217,15 +234,22 @@ class GalaxyAdapter:
         input_mapping: dict[str, str],
         params: dict[str, Any],
         work_dir: Path,
+        tool_dir: Path | None = None,
     ) -> RunHandle:
         """Run a single workflow toolspec via Galaxy.
 
-        Checks tool availability first, then submits to the Galaxy instance.
+        Delegates to ``generate()`` + ``submit()``: the ``generate()`` method
+        builds a ``.ga`` workflow from the spec, and ``submit()`` invokes it
+        on the Galaxy instance (planemo or remote).
+
+        If ``tool_dir`` is provided (Phase 3A: discovered Tool Shed XML),
+        it is passed to planemo via ``--tool_dir`` so the downloaded tool
+        XML is available in the local Galaxy instance.
         """
-        raise NotImplementedError(
-            "GalaxyAdapter.submit_spec will be wired when dispatch() is "
-            "unified with the agent path."
-        )
+        handle = self.generate(spec, input_mapping)
+        if tool_dir:
+            handle.metadata["tool_dir"] = str(tool_dir)
+        return self.submit(handle, input_mapping, params, work_dir)
 
     def generate(
         self,
@@ -280,14 +304,21 @@ class GalaxyAdapter:
         self._check_tool_availability(tool_name)
 
         if self._config.mode == "planemo":
-            return self._submit_planemo(handle, work_dir, ga_path)
+            return self._submit_planemo(handle, work_dir, ga_path, input_mapping)
         else:
-            return self._submit_remote(handle, work_dir, ga_path)
+            return self._submit_remote(handle, work_dir, ga_path, input_mapping)
 
     def _submit_planemo(
-        self, handle: WorkflowHandle, work_dir: Path, ga_path: Path
+        self, handle: WorkflowHandle, work_dir: Path, ga_path: Path,
+        input_mapping: dict[str, str] | None = None,
     ) -> RunHandle:
-        """Submit via planemo local Galaxy instance."""
+        """Submit via planemo local Galaxy instance.
+
+        Starts planemo serve, waits for the server to be ready, then
+        imports the workflow, uploads inputs, and invokes it via bioblend.
+        Returns a RunHandle with the Galaxy invocation ID as run_id and
+        the planemo PID stored in metadata for cleanup.
+        """
         cmd = [
             self.executable,
             "serve",
@@ -296,6 +327,11 @@ class GalaxyAdapter:
             str(work_dir / "galaxy"),
             "--port", "8765",
         ]
+        # Support --tool_dir for discovered tools (Phase 3A)
+        tool_dir = handle.metadata.get("tool_dir")
+        if tool_dir:
+            cmd.extend(["--tool_dir", str(tool_dir)])
+
         extra_args = handle.metadata.get("extra_args", [])
         cmd.extend(extra_args)
         cmd.extend(self._config.extra_args)
@@ -309,20 +345,77 @@ class GalaxyAdapter:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        planemo_pid = proc.pid
+
+        # Wait for the Galaxy server to be ready
+        import httpx
+
+        server_url = "http://localhost:8765/api/version"
+        for _ in range(30):
+            try:
+                resp = httpx.get(server_url, timeout=2.0)
+                if resp.status_code == 200:
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+        else:
+            raise RuntimeError(
+                "planemo server did not become ready within 60 seconds"
+            )
+
+        # Connect via bioblend and invoke the workflow
+        gi = self._get_galaxy_instance()
+
+        # Import the workflow
+        workflow_content = ga_path.read_text()
+        imported = gi.workflows.import_workflow_dict(
+            json.loads(workflow_content)
+        )
+        workflow_id = imported.get("id", "")
+
+        # Create a new history
+        history = gi.histories.create_history(
+            name=f"BioLedger_{int(time.time())}"
+        )
+        history_id = history.get("id", "")
+
+        # Upload input files to the history
+        input_dataset_map: dict[str, dict] = {}
+        inputs = input_mapping or handle.input_mapping
+        for input_name, file_path in inputs.items():
+            if file_path and Path(file_path).exists():
+                upload_result = gi.tools.upload_file(
+                    file_path,
+                    history_id,
+                    file_name=input_name,
+                )
+                dataset_id = upload_result.get("outputs", [{}])[0].get("id", "")
+                input_dataset_map[input_name] = {"id": dataset_id, "src": "hda"}
+
+        # Invoke the workflow
+        invocation = gi.workflows.invoke_workflow(
+            workflow_id,
+            history_id=history_id,
+            inputs=input_dataset_map,
+        )
+        invocation_id = invocation.get("id", "")
 
         return RunHandle(
             executor="galaxy",
-            run_id=str(proc.pid),
+            run_id=invocation_id,
             entry_id="",
             work_dir=work_dir,
             submitted_at=time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
             ),
             status="running",
+            metadata={"planemo_pid": planemo_pid},
         )
 
     def _submit_remote(
-        self, handle: WorkflowHandle, work_dir: Path, ga_path: Path
+        self, handle: WorkflowHandle, work_dir: Path, ga_path: Path,
+        input_mapping: dict[str, str] | None = None,
     ) -> RunHandle:
         """Submit via bioblend to a remote Galaxy server."""
         client = self._get_bioblend_client()
@@ -340,10 +433,24 @@ class GalaxyAdapter:
         )
         history_id = history.get("id", "")
 
+        # Upload input files to the history
+        input_dataset_map: dict[str, dict] = {}
+        inputs = input_mapping or handle.input_mapping
+        for input_name, file_path in inputs.items():
+            if file_path and Path(file_path).exists():
+                upload_result = client.tools.upload_file(
+                    file_path,
+                    history_id,
+                    file_name=input_name,
+                )
+                dataset_id = upload_result.get("outputs", [{}])[0].get("id", "")
+                input_dataset_map[input_name] = {"id": dataset_id, "src": "hda"}
+
         # Run the workflow
         invocation = client.workflows.invoke_workflow(
             workflow_id,
             history_id=history_id,
+            inputs=input_dataset_map,
         )
         invocation_id = invocation.get("id", "")
 
@@ -359,36 +466,20 @@ class GalaxyAdapter:
         )
 
     def poll(self, run_handle: RunHandle) -> RunStatus | None:
-        """Check if the Galaxy job is still running."""
-        if self._config.mode == "planemo":
-            return self._poll_planemo(run_handle)
-        else:
-            return self._poll_remote(run_handle)
+        """Check if the Galaxy workflow invocation is still running.
 
-    def _poll_planemo(self, run_handle: RunHandle) -> RunStatus | None:
-        """Poll planemo local Galaxy process."""
+        Both planemo and remote modes use bioblend to poll the invocation state.
+        """
+        return self._poll_invocation(run_handle)
+
+    def _poll_invocation(self, run_handle: RunHandle) -> RunStatus | None:
+        """Poll Galaxy workflow invocation via bioblend (unified for both modes)."""
+        gi = self._get_galaxy_instance()
         try:
-            pid = int(run_handle.run_id)
-        except ValueError:
-            return None
-
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return self._check_completion_planemo(run_handle)
-        except PermissionError:
-            return None
-
-        return RunStatus(state="running", message="")
-
-    def _poll_remote(self, run_handle: RunHandle) -> RunStatus | None:
-        """Poll remote Galaxy workflow invocation via bioblend."""
-        client = self._get_bioblend_client()
-        try:
-            invocations = client.workflows.show_invocation(
+            invocation = gi.workflows.show_invocation(
                 run_handle.run_id
             )
-            state = invocations.get("state", "unknown")
+            state = invocation.get("state", "unknown")
             if state in ("done", "failed"):
                 run_handle.status = "completed" if state == "done" else "failed"
                 return RunStatus(
@@ -400,70 +491,44 @@ class GalaxyAdapter:
             logger.warning("Failed to poll Galaxy invocation: %s", e)
             return None
 
-    def _check_completion_planemo(
-        self, run_handle: RunHandle
-    ) -> RunStatus | None:
-        """Check planemo completion from log file."""
-        log_path = Path(run_handle.work_dir) / "galaxy.log"
-        if log_path.exists():
-            content = log_path.read_text()
-            if "Error" in content or "error" in content:
-                run_handle.status = "failed"
-                return RunStatus(
-                    state="failed",
-                    message="See galaxy.log for details",
+    def _shutdown_planemo(self, run_handle: RunHandle) -> None:
+        """Shut down the planemo server process after completion."""
+        planemo_pid = run_handle.metadata.get("planemo_pid")
+        if planemo_pid:
+            try:
+                subprocess.run(
+                    ["kill", "-TERM", str(planemo_pid)],
+                    capture_output=True,
+                    timeout=5,
                 )
-            if "Serving on" in content and "Shutting down" in content:
-                run_handle.status = "completed"
-                return RunStatus(state="completed")
-
-        run_handle.status = "unknown"
-        return RunStatus(
-            state="unknown",
-            message="Could not determine completion status",
-        )
+            except Exception as e:
+                logger.warning("Failed to shut down planemo: %s", e)
 
     def collect(self, run_handle: RunHandle) -> list[Any]:
         """Collect outputs from a completed Galaxy run.
 
-        In planemo mode: discover files from the Galaxy work directory.
-        In remote mode: download outputs via bioblend.
+        Both planemo and remote modes use bioblend to download outputs.
+        In planemo mode, also shuts down the planemo server after collection.
         """
-        if self._config.mode == "remote":
-            return self._collect_remote(run_handle)
-        else:
-            return self._collect_planemo(run_handle)
+        outputs = self._collect_bioblend(run_handle)
 
-    def _collect_planemo(self, run_handle: RunHandle) -> list[Any]:
-        """Collect outputs from local planemo Galaxy."""
-        work_dir = Path(run_handle.work_dir)
-        outputs: list[dict[str, Any]] = []
-
-        # Look for output files in the Galaxy working directory
-        galaxy_dir = work_dir / "galaxy"
-        if galaxy_dir.exists():
-            for f in galaxy_dir.rglob("*.dat"):
-                if f.is_file():
-                    outputs.append({
-                        "path": str(f),
-                        "name": f.name,
-                        "size": f.stat().st_size,
-                    })
+        if self._config.mode == "planemo":
+            self._shutdown_planemo(run_handle)
 
         return outputs
 
-    def _collect_remote(self, run_handle: RunHandle) -> list[Any]:
-        """Download outputs from remote Galaxy via bioblend."""
-        client = self._get_bioblend_client()
+    def _collect_bioblend(self, run_handle: RunHandle) -> list[Any]:
+        """Download outputs from Galaxy via bioblend (unified for both modes)."""
+        gi = self._get_galaxy_instance()
         outputs: list[dict[str, Any]] = []
 
         try:
-            invocation = client.workflows.show_invocation(
+            invocation = gi.workflows.show_invocation(
                 run_handle.run_id
             )
             history_id = invocation.get("history_id", "")
             if history_id:
-                datasets = client.histories.show_history(
+                datasets = gi.histories.show_history(
                     history_id, contents=True
                 )
                 for ds in datasets:

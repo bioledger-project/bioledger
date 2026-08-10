@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from bioledger.core.engines.dispatch import _adapter_registry, dispatch
 from bioledger.core.engines.protocol import RunHandle
@@ -257,12 +254,33 @@ class TestDispatchWithSnakemake:
 
 
 class TestSnakemakeSubmitSpec:
-    def test_raises_not_implemented(self):
+    def test_submit_spec_generates_snakefile_and_returns_runhandle(self, tmp_path):
+        """submit_spec() should generate Snakefile and return RunHandle."""
         adapter = SnakemakeAdapter()
-        with pytest.raises(NotImplementedError, match="Phase 2b"):
-            adapter.submit_spec(
-                spec=_MockSpec(),
-                input_mapping={},
-                params={},
-                work_dir=Path("/tmp"),
+        spec = _MockSpec(
+            inputs={"input": _MockInput("input", collection=False)},
+        )
+        with (
+            patch.object(type(adapter), "executable", new_callable=lambda: "snakemake"),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            mock_proc = mock_popen.return_value
+            mock_proc.pid = 12345
+            handle = adapter.submit_spec(
+                spec=spec,
+                input_mapping={"input": "/data/file.bam"},
+                params={"threads": "4"},
+                work_dir=tmp_path,
             )
+        assert handle.executor == "snakemake"
+        assert handle.run_id == "12345"
+        assert handle.status == "running"
+        # Verify Snakefile was written
+        snakefile_path = tmp_path / "Snakefile"
+        assert snakefile_path.exists()
+        content = snakefile_path.read_text()
+        assert "rule samtools_sort" in content
+        assert "rule all" in content
+        # Verify config.yaml was written
+        config_path = tmp_path / "config.yaml"
+        assert config_path.exists()

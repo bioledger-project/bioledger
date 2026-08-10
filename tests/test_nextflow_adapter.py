@@ -38,6 +38,7 @@ class _MockSpec:
         inputs=None,
         outputs=None,
         executors=None,
+        parameters=None,
     ):
         self.name = name
         self.container = container
@@ -48,6 +49,7 @@ class _MockSpec:
             "sorted_bam": _MockOutput("sorted_bam", "*.sorted.bam")
         }
         self.executors = executors or ["nextflow"]
+        self.parameters = parameters or {}
 
 
 class TestParseCollectionValue:
@@ -137,6 +139,102 @@ class TestNextflowGenerate:
         handle = adapter.generate(spec=spec, input_mapping={"bam": "data/*.bam"})
         assert "collection_inputs" in handle.metadata
         assert "bam" in handle.metadata["collection_inputs"]
+
+    def test_combine_chains_at_same_level(self, tmp_path):
+        """Verify combine() is chained on the scatter channel, not nested."""
+        adapter = NextflowAdapter()
+        spec = _MockSpec(
+            inputs={
+                "reads": _MockInput("reads", collection=True),
+                "ref": _MockInput("ref", collection=False),
+                "adapter": _MockInput("adapter", collection=False),
+                "config": _MockInput("config", collection=False),
+            },
+        )
+        handle = adapter.generate(
+            spec=spec,
+            input_mapping={
+                "reads": "data/*.fastq",
+                "ref": "/data/ref.fa",
+                "adapter": "/data/adapters.fa",
+                "config": "/data/config.txt",
+            },
+        )
+        content = handle.artifact_path.read_text()
+        # Extract the workflow call line
+        wf_lines = [line.strip() for line in content.splitlines() if "samtools_sort(" in line]
+        assert wf_lines, "Expected a process call in workflow"
+        wf_call = wf_lines[0]
+        # Should be: reads_ch.combine(ref_ch).combine(adapter_ch).combine(config_ch)
+        assert wf_call.count(".combine(") == 3
+        # No nested combine inside combine arguments
+        import re
+        combines = re.findall(r"\.combine\(([^)]+)\)", wf_call)
+        for arg in combines:
+            assert ".combine(" not in arg, f"Nested combine found in argument: {arg}"
+
+    def test_combine_zero_single_inputs(self, tmp_path):
+        """With only a collection input, no combine() should appear."""
+        adapter = NextflowAdapter()
+        spec = _MockSpec(
+            inputs={"reads": _MockInput("reads", collection=True)},
+        )
+        handle = adapter.generate(
+            spec=spec, input_mapping={"reads": "data/*.fastq"}
+        )
+        content = handle.artifact_path.read_text()
+        wf_lines = [line.strip() for line in content.splitlines() if "samtools_sort(" in line]
+        assert wf_lines
+        assert ".combine(" not in wf_lines[0]
+
+    def test_combine_one_single_input(self, tmp_path):
+        """With 1 single input, should have exactly one non-nested combine()."""
+        adapter = NextflowAdapter()
+        spec = _MockSpec(
+            inputs={
+                "reads": _MockInput("reads", collection=True),
+                "ref": _MockInput("ref", collection=False),
+            },
+        )
+        handle = adapter.generate(
+            spec=spec,
+            input_mapping={"reads": "data/*.fastq", "ref": "/data/ref.fa"},
+        )
+        content = handle.artifact_path.read_text()
+        wf_lines = [line.strip() for line in content.splitlines() if "samtools_sort(" in line]
+        assert wf_lines
+        assert wf_lines[0].count(".combine(") == 1
+        import re
+        combines = re.findall(r"\.combine\(([^)]+)\)", wf_lines[0])
+        for arg in combines:
+            assert ".combine(" not in arg
+
+    def test_combine_two_single_inputs(self, tmp_path):
+        """With 2 single inputs, should have two chained non-nested combine()s."""
+        adapter = NextflowAdapter()
+        spec = _MockSpec(
+            inputs={
+                "reads": _MockInput("reads", collection=True),
+                "ref": _MockInput("ref", collection=False),
+                "adapter": _MockInput("adapter", collection=False),
+            },
+        )
+        handle = adapter.generate(
+            spec=spec,
+            input_mapping={
+                "reads": "data/*.fastq",
+                "ref": "/data/ref.fa",
+                "adapter": "/data/adapters.fa",
+            },
+        )
+        content = handle.artifact_path.read_text()
+        wf_lines = [line.strip() for line in content.splitlines() if "samtools_sort(" in line]
+        assert wf_lines
+        assert wf_lines[0].count(".combine(") == 2
+        import re
+        combines = re.findall(r"\.combine\(([^)]+)\)", wf_lines[0])
+        for arg in combines:
+            assert ".combine(" not in arg
 
 
 class TestNextflowParamsJson:
@@ -255,3 +353,71 @@ class TestNextflowDispatch:
         spec = _MockSpec(executors=["docker"])
         adapter = dispatch(spec, engine="nextflow")
         assert isinstance(adapter, NextflowAdapter)
+
+
+class TestNextflowSubmitSpec:
+    def test_submit_spec_generates_workflow_and_returns_runhandle(self, tmp_path):
+        """submit_spec() should generate main.nf with workflow block and return RunHandle."""
+        adapter = NextflowAdapter()
+        spec = _MockSpec(
+            inputs={
+                "input": _MockInput("input", collection=False),
+            },
+        )
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = mock_popen.return_value
+            mock_proc.pid = 12345
+            handle = adapter.submit_spec(
+                spec=spec,
+                input_mapping={"input": "/data/file.bam"},
+                params={"threads": "4"},
+                work_dir=tmp_path,
+            )
+        assert handle.executor == "nextflow"
+        assert handle.run_id == "12345"
+        assert handle.status == "running"
+        # Verify main.nf was written with workflow block
+        nf_path = tmp_path / "main.nf"
+        assert nf_path.exists()
+        content = nf_path.read_text()
+        assert "process samtools_sort" in content
+        assert "workflow {" in content
+        assert "samtools_sort(input_ch)" in content or "samtools_sort(" in content
+        # Verify params.json was written
+        params_path = tmp_path / "params.json"
+        assert params_path.exists()
+
+    def test_submit_spec_uses_module_dir_when_provided(self, tmp_path):
+        """submit_spec() with module_dir should use the downloaded main.nf."""
+        adapter = NextflowAdapter()
+        spec = _MockSpec(
+            inputs={
+                "input": _MockInput("input", collection=False),
+            },
+        )
+        # Create a fake downloaded module
+        module_dir = tmp_path / "module"
+        module_dir.mkdir()
+        (module_dir / "main.nf").write_text(
+            "process CUSTOM_PROCESS {\n"
+            "    container 'custom:latest'\n"
+            "    input:\n    path input\n"
+            "    script:\n    echo hello\n"
+            "}\n"
+        )
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = mock_popen.return_value
+            mock_proc.pid = 99999
+            adapter.submit_spec(
+                spec=spec,
+                input_mapping={"input": "/data/file.bam"},
+                params={},
+                work_dir=tmp_path / "run",
+                module_dir=module_dir,
+            )
+        nf_path = tmp_path / "run" / "main.nf"
+        assert nf_path.exists()
+        content = nf_path.read_text()
+        # Should contain the downloaded process, not the generated one
+        assert "CUSTOM_PROCESS" in content
+        assert "process samtools_sort" not in content

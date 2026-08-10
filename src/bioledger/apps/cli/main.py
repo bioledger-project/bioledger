@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from rich.prompt import Prompt
 
 load_dotenv()  # Load .env into process environment before anything else
 
@@ -157,11 +156,7 @@ def tool_import(
         help="Render the resulting spec to stdout without saving to the store",
     ),
 ) -> None:
-    """Import a tool from Galaxy XML, Nextflow module, BioLedger YAML, or a tool directory/suite."""
-    from bioledger.forges.toolforge.translators.galaxy_context import (
-        GalaxySuiteContext,
-        resolve_import_context,
-    )
+    """Import a tool from a Nextflow module or BioLedger YAML."""
     from bioledger.toolspec.load import load_spec
     from bioledger.toolspec.models import ToolSpec
 
@@ -169,31 +164,18 @@ def tool_import(
         if not use_llm:
             console.print("[red]Directory import requires --use-llm[/red]")
             raise typer.Exit(1)
-        context = resolve_import_context(path)
-        if isinstance(context, GalaxySuiteContext):
-            asyncio.run(
-                _tool_import_suite_async(context, name, dry_run=dry_run)
-            )
-        else:
-            asyncio.run(_tool_import_async(path, ".xml", name, dry_run=dry_run))
+        asyncio.run(_tool_import_async(path, ".nf", name, dry_run=dry_run))
         return
 
     suffix = path.suffix.lower()
 
-    if use_llm and suffix in (".xml", ".nf"):
+    if use_llm and suffix == ".nf":
         # Async LLM-enhanced import
         asyncio.run(_tool_import_async(path, suffix, name, dry_run=dry_run))
         return
 
     # Programmatic import (no LLM)
-    if suffix in (".xml",):
-        from bioledger.forges.toolforge.translators.galaxy import from_galaxy_xml
-
-        exec_spec = from_galaxy_xml(path.read_text())
-        if name:
-            exec_spec.name = name
-        spec = ToolSpec(execution=exec_spec)
-    elif suffix in (".nf",):
+    if suffix == ".nf":
         from bioledger.forges.toolforge.translators.nextflow import (
             from_nextflow_module,
         )
@@ -284,7 +266,6 @@ async def _tool_import_async(
     try:
         from bioledger.core.llm.agents import ForgeDeps
         from bioledger.forges.toolforge.agent import ToolForgeAgent
-        from bioledger.forges.toolforge.translators.galaxy import import_galaxy_tool
         from bioledger.forges.toolforge.translators.nextflow import (
             import_nextflow_module,
         )
@@ -302,9 +283,7 @@ async def _tool_import_async(
     dummy_session = LedgerSession(name="tool_import_temp")
     deps = ForgeDeps(session=dummy_session, config=config, context_mode="utility")
 
-    if suffix == ".xml":
-        spec = await import_galaxy_tool(path, deps, agent, use_llm=True)
-    elif suffix == ".nf":
+    if suffix == ".nf":
         spec = await import_nextflow_module(path, deps, agent, use_llm=True)
     else:
         console.print(f"[red]Unsupported file type for LLM import: {suffix}[/red]")
@@ -314,94 +293,6 @@ async def _tool_import_async(
         spec.execution.name = name
 
     _finalize_tool_import(spec, dry_run=dry_run)
-
-
-async def _tool_import_suite_async(
-    suite,
-    name: str,
-    *,
-    dry_run: bool = False,
-) -> None:
-    """Import multiple Galaxy tools from a tool suite directory.
-
-    Prompts the user to select which tools to import (default: all).
-    """
-    from rich.table import Table
-
-    from bioledger.forges.toolforge.translators.galaxy_context import (
-        GalaxySuiteContext,
-    )
-
-    if not isinstance(suite, GalaxySuiteContext):
-        raise TypeError("Expected GalaxySuiteContext")
-
-    # Show available tools
-    table = Table(title=f"Found {len(suite.xml_paths)} tool(s) in {suite.base_dir}")
-    table.add_column("#", style="dim")
-    table.add_column("File", style="cyan")
-    table.add_column("ID")
-    for i, xml_path in enumerate(suite.xml_paths, 1):
-        try:
-            import xml.etree.ElementTree as ET
-            root = ET.parse(xml_path).getroot()
-            tool_id = root.get("id", xml_path.stem)
-        except Exception:
-            tool_id = xml_path.stem
-        table.add_row(str(i), xml_path.name, tool_id)
-    console.print(table)
-
-    choice = Prompt.ask(
-        "Import which tools? (comma-sep numbers, or 'all')",
-        default="all",
-    )
-
-    if choice.strip().lower() == "all":
-        selected = suite.xml_paths
-    else:
-        try:
-            indices = {int(x.strip()) for x in choice.split(",")}
-            selected = [
-                suite.xml_paths[i - 1]
-                for i in sorted(indices)
-                if 1 <= i <= len(suite.xml_paths)
-            ]
-        except (ValueError, IndexError):
-            console.print("[red]Invalid selection[/red]")
-            raise typer.Exit(1)
-
-    if not selected:
-        console.print("[red]No tools selected[/red]")
-        raise typer.Exit(1)
-
-    # Import each selected tool
-    from bioledger.config import BioLedgerConfig
-    from bioledger.core.llm.agents import ForgeDeps
-    from bioledger.forges.toolforge.agent import ToolForgeAgent
-    from bioledger.forges.toolforge.translators.galaxy import import_galaxy_tool
-    from bioledger.ledger.models import LedgerSession
-
-    config = BioLedgerConfig()
-    agent = ToolForgeAgent(config)
-    dummy_session = LedgerSession(name="tool_import_temp")
-    deps = ForgeDeps(session=dummy_session, config=config, context_mode="utility")
-
-    for xml_path in selected:
-        console.print(f"\n[cyan]Importing {xml_path.name}…[/cyan]")
-        # Build a per-tool context that shares the suite's macros.xml
-        from bioledger.forges.toolforge.translators.galaxy_context import (
-            GalaxyImportContext,
-        )
-        tool_ctx = GalaxyImportContext(
-            xml_path=xml_path,
-            macros_xml_path=suite.macros_xml_path,
-            base_dir=suite.base_dir,
-        )
-        spec = await import_galaxy_tool(
-            xml_path, deps, agent, use_llm=True, context=tool_ctx
-        )
-        if name:
-            spec.execution.name = name
-        _finalize_tool_import(spec, dry_run=dry_run)
 
 
 @tool_app.command("validate")
@@ -531,6 +422,63 @@ def tool_export(
         console.print(f"[green]Written to {output}[/green]")
     else:
         console.print(result)
+
+
+@tool_app.command("search")
+def tool_search(
+    query: str = typer.Argument(..., help="Search query (tool name or keyword)"),
+    source: str = typer.Option(
+        "all", "--source", help="Search source: 'toolshed', 'nfcore', or 'all'"
+    ),
+) -> None:
+    """Search Galaxy Tool Shed and/or nf-core modules for tools."""
+    if source in ("toolshed", "all"):
+        console.print("\n[bold cyan]Galaxy Tool Shed results:[/bold cyan]")
+        try:
+            from bioledger.core.engines.toolshed_search import search_toolshed
+
+            results = search_toolshed(query)
+            if results:
+                table = Table(title="Tool Shed")
+                table.add_column("Tool ID", style="cyan")
+                table.add_column("Name")
+                table.add_column("Description")
+                table.add_column("Repo")
+                for r in results:
+                    table.add_row(
+                        r.tool_id,
+                        r.name,
+                        r.description[:60] if r.description else "",
+                        f"{r.repo_owner}/{r.repo_name}",
+                    )
+                console.print(table)
+            else:
+                console.print("[dim]No results.[/dim]")
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+
+    if source in ("nfcore", "all"):
+        console.print("\n[bold cyan]nf-core modules results:[/bold cyan]")
+        try:
+            from bioledger.core.engines.nfcore_search import search_nfcore
+
+            results = search_nfcore(query)
+            if results:
+                table = Table(title="nf-core modules")
+                table.add_column("Name", style="cyan")
+                table.add_column("Subdirectory")
+                table.add_column("Description")
+                for r in results:
+                    table.add_row(
+                        r.name,
+                        r.subdirectory,
+                        r.description[:60] if r.description else "",
+                    )
+                console.print(table)
+            else:
+                console.print("[dim]No results.[/dim]")
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
 
 
 # --- Analysis ---
@@ -791,9 +739,35 @@ async def _analysis_chat(session_id: str) -> None:
 
                     session_dir = get_session_dir(config.home_dir, session.id)
 
+                    # Discovered-tool path: if the LLM set discovered_source,
+                    # download the tool and run via submit_spec() on the
+                    # appropriate engine.
+                    if tool_request.discovered_source:
+                        try:
+                            entry, handle = agent.submit_discovered(
+                                tool_name=tool_request.tool_name,
+                                discovered_source=tool_request.discovered_source,
+                                input_mapping={
+                                    k: str(v) for k, v in input_files.items()
+                                },
+                                params=tool_request.params_as_dict(),
+                                parent_id=parent_id,
+                            )
+                            response = (
+                                f"Submitted discovered tool "
+                                f"{tool_request.tool_name} as job {entry.id}. "
+                                f"Source: {tool_request.discovered_source}. "
+                                f"Type 'status' to check progress."
+                            )
+                            console.print(f"\n[blue]assistant>[/blue] {response}")
+                        except Exception as e:
+                            response = (
+                                f"Failed to run discovered tool: {e}"
+                            )
+                            console.print(f"\n[red]{response}[/red]")
                     # Fan-out path: if the LLM requested an engine, use
                     # submit_fanout instead of the normal Docker path.
-                    if tool_request.engine:
+                    elif tool_request.engine:
                         try:
                             entry, handle = agent.submit_fanout(
                                 tool_name=tool_request.tool_name,
