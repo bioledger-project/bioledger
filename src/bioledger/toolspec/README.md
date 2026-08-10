@@ -368,5 +368,5 @@ Today, each `inputs.X` is a single file or directory. For a variadic pattern, de
 **Q: Where does `tool_spec_snapshot` come from?**
 At run time, `run_tool` serializes `spec.execution` into the `LedgerEntry`. Even if you later edit the spec, historical runs keep the exact inputs/outputs/command used at the time.
 
-**Q: Can I reuse a tool spec from Galaxy or Nextflow?**
-Yes — `bioledger tool import` accepts `.xml` (Galaxy) and `.nf` (Nextflow) in addition to `.bioledger.yaml`. See `examples/galaxy_tool_import/`.
+**Q: Can I reuse a tool spec from Nextflow?**
+Yes — `bioledger tool import` accepts `.nf` (Nextflow) and `.bioledger.yaml`. You can also search the Galaxy Tool Shed and nf-core modules with `bioledger tool search`. See `examples/galaxy_tool_import/`.

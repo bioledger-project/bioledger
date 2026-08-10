@@ -78,7 +78,7 @@ ISA-Tab to reproducible package without writing workflow syntax. See the [full w
 
 ### More examples
 
-- **[Galaxy tool import](examples/galaxy_tool_import/)** — import existing Galaxy tool wrappers into BioLedger
+- **[Tool discovery & import](examples/galaxy_tool_import/)** — search the Galaxy Tool Shed and nf-core modules, import Nextflow modules, and export to Galaxy XML or Nextflow DSL2
 - **[CSV to ISA-Tab](examples/csv_to_isatab/)** — start from a plain samplesheet and convert to structured metadata
 - **[Variant calling on *L. donovani*](examples/variant_calling/)** — use the public library repos to discover tools and data, then run a full pipeline end-to-end
 - **Fan-out scatter** — run a tool across a collection of files using a workflow engine (requires `bioledger[snakemake]` or `bioledger[nextflow]`)
@@ -170,7 +170,7 @@ BioLedger is organized into **forges** — specialized modules that handle diffe
 | Forge | Purpose |
 |-------|---------|
 | **ISAForge** | ISA-Tab metadata generation and validation |
-| **ToolForge** | Tool spec management, translation (Galaxy ↔ Nextflow) |
+| **ToolForge** | Tool spec management, translation (export to Galaxy XML / Nextflow DSL2), tool discovery (Tool Shed + nf-core search) |
 | **AnalysisForge** | Interactive analysis, tool execution, workflow crystallization |
 | **CrateForge** | RO-Crate packaging with full provenance |
 | **Engines** | Multi-engine execution adapters (Snakemake, Nextflow, Galaxy) |
@@ -179,11 +179,14 @@ BioLedger is organized into **forges** — specialized modules that handle diffe
 
 ### ToolForge — Tool Spec Management
 
-ToolForge manages bioinformatics tool specifications. Import tools from Galaxy XML or Nextflow modules, validate them, search the local store, and export to either format.
+ToolForge manages bioinformatics tool specifications. Import tools from Nextflow modules or BioLedger YAML, search the Galaxy Tool Shed and nf-core modules for new tools, validate specs, search the local store, and export to either Galaxy XML or Nextflow DSL2.
 
 ```bash
-# Import a Galaxy tool wrapper
-bioledger tool import fastqc.xml
+# Search the Galaxy Tool Shed and nf-core modules
+bioledger tool search "fastqc"
+bioledger tool search "bwa" --source toolshed
+bioledger tool search "samtools" --source nfcore
+bioledger tool search "alignment" --source all
 
 # Import a Nextflow module
 bioledger tool import trimmomatic.nf
@@ -208,6 +211,23 @@ bioledger tool show fastqc
 bioledger tool export fastqc --format nextflow
 bioledger tool export fastqc --format galaxy -o fastqc_exported.xml
 ```
+
+#### Tool Discovery
+
+BioLedger can search external tool repositories — the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/) and [nf-core modules](https://nf-co.re/modules) — for tools that aren't installed locally. Use `bioledger tool search` to find tools by keyword, then run them directly in an interactive session via the agent's `search_toolshed` and `search_nfcore` tools.
+
+```
+you> search the tool shed for fastqc
+assistant> Tool Shed results:
+  fastqc: FastQC — Read Quality reports (repo: iuc/fastqc)
+  ...
+
+you> run the fastqc tool from the tool shed on the raw reads
+assistant> Submitted discovered tool fastqc as job abc123.
+           Source: toolshed:iuc/fastqc. Type 'status' to check progress.
+```
+
+Discovered tools are downloaded, parsed into an ExecutionSpec, and submitted to the appropriate engine (Galaxy/planemo for Tool Shed tools, Nextflow for nf-core modules).
 
 Tool specs are stored as YAML in `~/.bioledger/tools/` and use a two-layer model:
 
@@ -374,7 +394,7 @@ Setting `BIOLEDGER_DEFAULT_MODEL` switches the provider for all primary tasks. U
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -v          # 471 tests
+pytest tests/ -v          # 468 tests
 ruff check src/ tests/
 mypy src/bioledger
 ```

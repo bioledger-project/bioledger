@@ -50,7 +50,7 @@ The ISA-Tab records the full experimental context: biological sources, derived s
 
 ### The tool spec
 
-`line_counter.bioledger.yaml` defines a trivial tool that counts lines in a text file (like an ISA-Tab study file). We're writing this by hand for the tutorial, but in practice **ToolForge can generate these for you** — import an existing Galaxy tool XML (`bioledger tool import fastqc.xml`), parse an nf-core Nextflow module (`bioledger tool import trimmomatic.nf`), or ask the LLM to draft one from scratch in an interactive session. See the [Galaxy tool import example](../galaxy_tool_import/) for a walkthrough.
+`line_counter.bioledger.yaml` defines a trivial tool that counts lines in a text file (like an ISA-Tab study file). We're writing this by hand for the tutorial, but in practice **ToolForge can help** — import a Nextflow module (`bioledger tool import trimmomatic.nf`), search the Galaxy Tool Shed and nf-core modules (`bioledger tool search "fastqc"`), or ask the LLM to draft one from scratch in an interactive session. See the [tool discovery & import example](../galaxy_tool_import/) for a walkthrough.
 
 ## 3. Import and validate the tool
 
