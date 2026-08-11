@@ -1,6 +1,6 @@
-# Example: Tool Discovery & Import
+# Example: Tool Discovery, Import & Export
 
-BioLedger can discover tools from external repositories — the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/) and [nf-core modules](https://nf-co.re/modules) — and import Nextflow modules or BioLedger YAML specs. Tool specs can be exported to either Galaxy XML or Nextflow DSL2.
+BioLedger can discover tools from external repositories and run them with their native workflow engines — no translation to BioLedger specs required. It can also import Nextflow modules as BioLedger specs, and export BioLedger specs to Galaxy XML or Nextflow DSL2.
 
 ## Files in this directory
 
@@ -11,9 +11,13 @@ BioLedger can discover tools from external repositories — the [Galaxy Tool She
   - `a_assay.txt` — Sequencing assay pointing to the FASTQ
   - `sample.fastq` — Tiny synthetic FASTQ file (4 reads)
 
-## Search for tools
+---
 
-Use `bioledger tool search` to find tools in the Galaxy Tool Shed and nf-core modules:
+## Tool Discovery: Search → Download → Run
+
+BioLedger searches the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/) and [nf-core modules](https://nf-co.re/modules) for tools that aren't installed locally. Discovered tools are downloaded and run via their **native workflow engine** — the original tool XML or Nextflow module is used directly, not translated to a BioLedger spec.
+
+### Search from the CLI
 
 ```bash
 # Search both sources
@@ -26,46 +30,7 @@ bioledger tool search "bwa" --source toolshed
 bioledger tool search "samtools" --source nfcore
 ```
 
-Results show tool name, description, and repository information.
-
-## Import a Nextflow module
-
-```bash
-bioledger tool import examples/galaxy_tool_import/trimmomatic.nf
-# ✓ Imported 'trimmomatic' → ~/.bioledger/tools/trimmomatic.bioledger.yaml
-```
-
-## Import a BioLedger YAML spec
-
-```bash
-bioledger tool import specs/samtools_sort.bioledger.yaml
-```
-
-## LLM-enhanced import (optional)
-
-For complex Nextflow modules, use `--use-llm` to get additional analysis and fixes:
-
-```bash
-# Requires an LLM API key (OpenAI, Google, Anthropic, or Azure)
-export OPENAI_API_KEY="your-key-here"
-
-# Import with LLM assistance
-bioledger tool import examples/galaxy_tool_import/trimmomatic.nf --use-llm
-```
-
-## Export to Galaxy XML or Nextflow DSL2
-
-Tool specs are format-agnostic. Export to either platform:
-
-```bash
-# To Galaxy XML
-bioledger tool export trimmomatic --format galaxy -o trimmomatic.xml
-
-# To Nextflow DSL2
-bioledger tool export trimmomatic --format nextflow -o trimmomatic.nf
-```
-
-## Run discovered tools in a session
+### Run discovered tools in a session
 
 Inside an interactive session, the agent can search external repositories and run discovered tools directly:
 
@@ -90,9 +55,44 @@ assistant> Submitted discovered tool fastqc as job abc123.
            Source: toolshed:iuc/fastqc. Type 'status' to check progress.
 ```
 
-Discovered tools are downloaded, parsed into an ExecutionSpec, and submitted to the appropriate engine:
-- **Galaxy Tool Shed tools** → run via planemo (local Galaxy instance)
-- **nf-core modules** → run via Nextflow
+**How it works:**
+- **Galaxy Tool Shed tools** → downloaded XML is served by planemo (local Galaxy) via `--tool_dir`. A minimal spec is extracted just to generate the `.ga` workflow wrapper.
+- **nf-core modules** → downloaded `main.nf` is run directly by Nextflow. No translation to BioLedger spec.
+
+---
+
+## Tool Import: Nextflow → BioLedger Spec
+
+You can still import a Nextflow module as a BioLedger spec (this translates the module into the BioLedger tool spec format for use with any engine):
+
+```bash
+bioledger tool import examples/galaxy_tool_import/trimmomatic.nf
+# ✓ Imported 'trimmomatic' → ~/.bioledger/tools/trimmomatic.bioledger.yaml
+```
+
+BioLedger YAML specs can also be imported directly:
+
+```bash
+bioledger tool import specs/samtools_sort.bioledger.yaml
+```
+
+> **Note:** Galaxy XML import (`bioledger tool import file.xml`) is no longer supported. Use tool discovery to search and run Galaxy Tool Shed tools directly via planemo.
+
+---
+
+## Tool Export: BioLedger Spec → Galaxy XML or Nextflow
+
+Tool specs are format-agnostic. Export to either platform:
+
+```bash
+# To Galaxy XML
+bioledger tool export trimmomatic --format galaxy -o trimmomatic.xml
+
+# To Nextflow DSL2
+bioledger tool export trimmomatic --format nextflow -o trimmomatic.nf
+```
+
+---
 
 ## See also
 

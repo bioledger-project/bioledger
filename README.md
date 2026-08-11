@@ -78,7 +78,7 @@ ISA-Tab to reproducible package without writing workflow syntax. See the [full w
 
 ### More examples
 
-- **[Tool discovery & import](examples/galaxy_tool_import/)** — search the Galaxy Tool Shed and nf-core modules, import Nextflow modules, and export to Galaxy XML or Nextflow DSL2
+- **[Tool discovery, import & export](examples/galaxy_tool_import/)** — search the Galaxy Tool Shed and nf-core modules, run discovered tools via their native engines, import Nextflow modules as specs, export to Galaxy XML or Nextflow DSL2
 - **[CSV to ISA-Tab](examples/csv_to_isatab/)** — start from a plain samplesheet and convert to structured metadata
 - **[Variant calling on *L. donovani*](examples/variant_calling/)** — use the public library repos to discover tools and data, then run a full pipeline end-to-end
 - **Fan-out scatter** — run a tool across a collection of files using a workflow engine (requires `bioledger[snakemake]` or `bioledger[nextflow]`)
@@ -227,7 +227,7 @@ assistant> Submitted discovered tool fastqc as job abc123.
            Source: toolshed:iuc/fastqc. Type 'status' to check progress.
 ```
 
-Discovered tools are downloaded, parsed into an ExecutionSpec, and submitted to the appropriate engine (Galaxy/planemo for Tool Shed tools, Nextflow for nf-core modules).
+Discovered tools are downloaded and run via their **native workflow engine** — the original tool XML or Nextflow module is used directly, not translated to a BioLedger spec. Galaxy Tool Shed tools run via planemo (local Galaxy); nf-core modules run via Nextflow.
 
 Tool specs are stored as YAML in `~/.bioledger/tools/` and use a two-layer model:
 
