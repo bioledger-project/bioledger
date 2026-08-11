@@ -57,27 +57,6 @@ def sample_tool_spec(sample_exec_spec: ExecutionSpec) -> ToolSpec:
 
 
 @pytest.fixture
-def sample_nextflow_dsl2() -> str:
-    """Minimal Nextflow DSL2 process for import testing."""
-    return """\
-process fastqc {
-    container 'quay.io/biocontainers/fastqc:0.11.9--0'
-
-    input:
-    path reads
-
-    output:
-    path "*_fastqc.html", emit: report
-
-    script:
-    \"\"\"
-    fastqc ${reads} -o . -t 4
-    \"\"\"
-}
-"""
-
-
-@pytest.fixture
 def tmp_tools_dir(tmp_path):
     """Temporary directory for ToolStore tests."""
     tools_dir = tmp_path / "tools"

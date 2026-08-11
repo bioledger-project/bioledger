@@ -74,4 +74,4 @@ This separation keeps AnalysisForge's provenance tracking strong while supportin
 ## See also
 
 - [Hello World](../hello_bioledger/) — end-to-end walkthrough starting from ISA-Tab
-- [Galaxy tool import](../galaxy_tool_import/) — importing tool specs from Galaxy XML
+- [Tool discovery](../tool_discovery/) — searching and running tools from the Galaxy Tool Shed and nf-core

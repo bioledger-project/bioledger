@@ -1,6 +1,6 @@
-"""Round-trip tests for to_nextflow_process and parameterized Snakefile generator.
+"""Round-trip tests for crystallized Nextflow workflows and parameterized Snakefile generator.
 
-Phase 2b-1: Harden to_nextflow_process with round-trip tests against
+Phase 2b-1: Harden Nextflow crystallization with round-trip tests against
 the toolspec library, and validate the Snakefile fan-out generator
 emits properly parameterized workflows (channels reference config[],
 not hardcoded paths).

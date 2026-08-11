@@ -17,7 +17,7 @@ import build_pages  # noqa: E402
 
 def test_discover_examples_finds_known_examples():
     names = {p.name for p in build_pages.discover_examples()}
-    assert {"hello_bioledger", "galaxy_tool_import", "csv_to_isatab", "variant_calling"} <= names
+    assert {"hello_bioledger", "tool_discovery", "csv_to_isatab", "variant_calling"} <= names
 
 
 def test_build_creates_expected_files(tmp_path):

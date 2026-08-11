@@ -1,1 +1,1 @@
-"""Format translators: Galaxy XML, Nextflow DSL2."""
+"""Nextflow DSL2 process generation for BioLedger specs."""

@@ -4,7 +4,7 @@ from typing import Any
 
 from bioledger.config import BioLedgerConfig
 from bioledger.core.llm.agents import ForgeDeps, make_agent
-from bioledger.toolspec.models import ExecutionSpec, ExecutionSpecDraft, ToolSpec
+from bioledger.toolspec.models import ExecutionSpec, ExecutionSpecDraft
 from bioledger.toolspec.validate import ValidationIssue
 
 
@@ -64,19 +64,6 @@ class ToolForgeAgent:
             output_type=list[str],
         )
 
-    @property
-    def _enrich_agent(self):
-        return self._get_agent(
-            "enrich_export",
-            instructions=(
-                "You are an expert in Galaxy tool XML and Nextflow DSL2. "
-                "Review and optionally improve the generated output. "
-                "Add help text, citations, or fix structural issues. "
-                "Return the improved output as a string."
-            ),
-            output_type=str,
-        )
-
     async def parse(
         self, source_text: str, source_type: str, error: str, deps: ForgeDeps
     ) -> ExecutionSpec:
@@ -108,19 +95,3 @@ class ToolForgeAgent:
         )
         result = await self._review_agent.run(prompt, deps=deps)
         return result.output
-
-    async def enrich_export(
-        self,
-        spec: ToolSpec,
-        generated_output: str,
-        target_format: str,
-        deps: ForgeDeps,
-    ) -> str:
-        """LLM reviews and improves generated Galaxy XML or Nextflow DSL2."""
-        prompt = (
-            f"Original BioLedger spec:\n{spec.model_dump_json(indent=2)}\n\n"
-            f"Generated {target_format}:\n{generated_output}"
-        )
-        result = await self._enrich_agent.run(prompt, deps=deps)
-        return result.output
-

@@ -1,10 +1,10 @@
-# Example: Tool Discovery, Import & Export
+# Example: Tool Discovery
 
-BioLedger can discover tools from external repositories and run them with their native workflow engines — no translation to BioLedger specs required. It can also import Nextflow modules as BioLedger specs, and export BioLedger specs to Galaxy XML or Nextflow DSL2.
+BioLedger can discover tools from external repositories — the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/) and [nf-core modules](https://nf-co.re/modules) — and run them with their native workflow engines. No translation to BioLedger specs is required.
 
 ## Files in this directory
 
-- **`trimmomatic.nf`** — Example Nextflow DSL2 process for import (Trimmomatic)
+- **`trimmomatic.nf`** — Example Nextflow DSL2 module (kept as reference; not importable as a BioLedger spec)
 - **`isatab/`** — Complete ISA-Tab dataset directory with synthetic test data:
   - `i_investigation.txt` — Investigation metadata
   - `s_study.txt` — Study with one sample
@@ -13,11 +13,9 @@ BioLedger can discover tools from external repositories and run them with their 
 
 ---
 
-## Tool Discovery: Search → Download → Run
+## Search for tools
 
-BioLedger searches the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/) and [nf-core modules](https://nf-co.re/modules) for tools that aren't installed locally. Discovered tools are downloaded and run via their **native workflow engine** — the original tool XML or Nextflow module is used directly, not translated to a BioLedger spec.
-
-### Search from the CLI
+Use `bioledger tool search` to find tools in the Galaxy Tool Shed and nf-core modules:
 
 ```bash
 # Search both sources
@@ -30,7 +28,11 @@ bioledger tool search "bwa" --source toolshed
 bioledger tool search "samtools" --source nfcore
 ```
 
-### Run discovered tools in a session
+Results show tool name, description, and repository information.
+
+---
+
+## Run discovered tools in a session
 
 Inside an interactive session, the agent can search external repositories and run discovered tools directly:
 
@@ -40,7 +42,7 @@ bioledger resume tool-discovery-test
 ```
 
 ```
-you> load examples/galaxy_tool_import/isatab/
+you> load examples/tool_discovery/isatab/
 Loaded dataset "Sample FastQC Test Dataset"
   Samples: 1
   Organisms: Homo sapiens
@@ -61,35 +63,12 @@ assistant> Submitted discovered tool fastqc as job abc123.
 
 ---
 
-## Tool Import: Nextflow → BioLedger Spec
+## Import a BioLedger YAML spec
 
-You can still import a Nextflow module as a BioLedger spec (this translates the module into the BioLedger tool spec format for use with any engine):
-
-```bash
-bioledger tool import examples/galaxy_tool_import/trimmomatic.nf
-# ✓ Imported 'trimmomatic' → ~/.bioledger/tools/trimmomatic.bioledger.yaml
-```
-
-BioLedger YAML specs can also be imported directly:
+If you have a BioLedger tool spec (`.bioledger.yaml`), you can import it to the local store:
 
 ```bash
 bioledger tool import specs/samtools_sort.bioledger.yaml
-```
-
-> **Note:** Galaxy XML import (`bioledger tool import file.xml`) is no longer supported. Use tool discovery to search and run Galaxy Tool Shed tools directly via planemo.
-
----
-
-## Tool Export: BioLedger Spec → Galaxy XML or Nextflow
-
-Tool specs are format-agnostic. Export to either platform:
-
-```bash
-# To Galaxy XML
-bioledger tool export trimmomatic --format galaxy -o trimmomatic.xml
-
-# To Nextflow DSL2
-bioledger tool export trimmomatic --format nextflow -o trimmomatic.nf
 ```
 
 ---

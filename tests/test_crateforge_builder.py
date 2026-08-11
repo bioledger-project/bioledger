@@ -3,7 +3,7 @@
 Validates:
 - Single-engine sessions (docker/conda) keep the existing Nextflow mainEntity path
 - Multi-engine sessions produce a composite mainEntity with hasPart references
-- Engine artifacts (workflow.nf, *.smk, workflow.ga) are added as supplementary files
+- Engine artifacts (workflow.nf, *.smk) are added as supplementary files
 - ledger.json is always included
 - Data files from entries are included
 """

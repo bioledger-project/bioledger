@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import tempfile
 from pathlib import Path
@@ -118,27 +117,6 @@ def _add_engine_artifact(
         )
         return "engine_nextflow.nf"
 
-    elif executor == "galaxy":
-        from bioledger.forges.analysisforge.crystallize import (
-            to_galaxy_workflow,
-        )
-
-        temp_session = LedgerSession(name="galaxy_subset")
-        for e in engine_entries:
-            temp_session.add(e)
-        ga_workflow = to_galaxy_workflow(temp_session)
-        ga_path = scratch / "workflow.ga"
-        ga_path.write_text(json.dumps(ga_workflow, indent=2))
-        crate.add_file(
-            str(ga_path),
-            dest_path="workflow.ga",
-            properties={
-                "description": "Galaxy workflow definition",
-                "programmingLanguage": "galaxy",
-            },
-        )
-        return "workflow.ga"
-
     return None
 
 
@@ -230,7 +208,7 @@ def build_rocrate(
 
     The RO-Crate includes:
     - Data files consumed/produced by selected entries
-    - A workflow (Nextflow, Snakemake, Galaxy, or composite) as mainEntity
+    - A workflow (Nextflow, Snakemake, or composite) as mainEntity
     - A ledger.json with provenance for selected entries
 
     For single-engine sessions (docker/conda only), the workflow is a
@@ -238,7 +216,7 @@ def build_rocrate(
 
     For multi-engine sessions (entries from 2+ distinct executors), a
     composite workflow entity is synthesized as the mainEntity. Each
-    engine's native artifact (workflow.nf, *.smk, workflow.ga) is added
+    engine's native artifact (workflow.nf, *.smk) is added
     as a supplementary (non-main) file, and the composite entity references
     them via hasPart. This avoids the rocrate library's single-value
     mainEntity limitation (last add_workflow(main=True) would overwrite

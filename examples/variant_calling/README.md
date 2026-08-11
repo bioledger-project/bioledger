@@ -303,12 +303,6 @@ workflow {
 }
 ```
 
-Or export to Galaxy:
-
-```bash
-bioledger crystallize abc123de --format galaxy
-```
-
 ---
 
 ## 7. Package into an RO-Crate

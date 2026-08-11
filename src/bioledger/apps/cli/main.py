@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from typing import Any
 
@@ -147,48 +146,25 @@ def session_archive(session_id: str) -> None:
 def tool_import(
     path: Path,
     name: str = typer.Option("", help="Override tool name"),
-    use_llm: bool = typer.Option(
-        False, "--use-llm", help="Use LLM to enhance import (requires API key)"
-    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
         help="Render the resulting spec to stdout without saving to the store",
     ),
 ) -> None:
-    """Import a tool from a Nextflow module or BioLedger YAML."""
+    """Import a tool from a BioLedger YAML spec file."""
     from bioledger.toolspec.load import load_spec
-    from bioledger.toolspec.models import ToolSpec
-
-    if path.is_dir():
-        if not use_llm:
-            console.print("[red]Directory import requires --use-llm[/red]")
-            raise typer.Exit(1)
-        asyncio.run(_tool_import_async(path, ".nf", name, dry_run=dry_run))
-        return
 
     suffix = path.suffix.lower()
 
-    if use_llm and suffix == ".nf":
-        # Async LLM-enhanced import
-        asyncio.run(_tool_import_async(path, suffix, name, dry_run=dry_run))
-        return
-
-    # Programmatic import (no LLM)
-    if suffix == ".nf":
-        from bioledger.forges.toolforge.translators.nextflow import (
-            from_nextflow_module,
-        )
-
-        exec_spec = from_nextflow_module(path.read_text())
-        if name:
-            exec_spec.name = name
-        spec = ToolSpec(execution=exec_spec)
-    elif suffix in (".yaml", ".yml"):
+    if suffix in (".yaml", ".yml"):
         spec = load_spec(path)
     else:
-        console.print(f"[red]Unsupported file type: {suffix}[/red]")
+        console.print(f"[red]Unsupported file type: {suffix}. Only .yaml/.yml is supported.[/red]")
         raise typer.Exit(1)
+
+    if name:
+        spec.execution.name = name
 
     _finalize_tool_import(spec, dry_run=dry_run)
 
@@ -215,84 +191,6 @@ def _finalize_tool_import(spec, *, dry_run: bool) -> None:
 
     if result.issues:
         print_validation_issues(result, console)
-
-
-async def _tool_import_async(
-    path: Path, suffix: str, name: str, *, dry_run: bool = False
-) -> None:
-    """Async LLM-enhanced tool import with API key validation."""
-    import os
-
-    # Lazy import config first to check which provider is configured
-    from bioledger.config import BioLedgerConfig
-
-    config = BioLedgerConfig()
-    model = config.llm.default_model  # e.g., "openai:gpt-4o" or "google-gla:gemini-1.5-flash"
-    provider = model.split(":")[0] if ":" in model else "openai"
-
-    # Map provider to required env var
-    provider_env_map = {
-        "openai": "OPENAI_API_KEY",
-        "google-gla": "GOOGLE_API_KEY",
-        "google-vertex": "GOOGLE_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "azure": "AZURE_OPENAI_API_KEY",
-        "groq": "GROQ_API_KEY",
-        "ollama": None,  # Ollama doesn't require an API key
-    }
-
-    required_env = provider_env_map.get(provider, "OPENAI_API_KEY")
-
-    if required_env and not os.getenv(required_env):
-        console.print(
-            f"[red]Error: --use-llm requires {required_env} for provider '{provider}'.[/red]\n\n"
-            f"Your configured model is: {model}\n"
-            f"Required env var: {required_env}\n\n"
-            "To fix this, either:\n\n"
-            f"1. Set the API key: export {required_env}=\"your-key-here\"\n\n"
-            "2. Or switch to a different provider by setting in your .env file:\n"
-            '   BIOLEDGER_DEFAULT_MODEL="google-gla:gemini-1.5-flash"\n'
-            '   BIOLEDGER_DEFAULT_MODEL="anthropic:claude-sonnet-4-20250514"\n\n'
-            "Supported providers and their required env vars:\n"
-            "  - openai: OPENAI_API_KEY\n"
-            "  - google-gla/google-vertex: GOOGLE_API_KEY\n"
-            "  - anthropic: ANTHROPIC_API_KEY\n"
-            "  - azure: AZURE_OPENAI_API_KEY\n\n"
-            "Or use programmatic import without --use-llm."
-        )
-        raise typer.Exit(1)
-
-    # Now import LLM-dependent modules
-    try:
-        from bioledger.core.llm.agents import ForgeDeps
-        from bioledger.forges.toolforge.agent import ToolForgeAgent
-        from bioledger.forges.toolforge.translators.nextflow import (
-            import_nextflow_module,
-        )
-    except Exception as e:
-        console.print(
-            f"[red]Error: Failed to initialize LLM components: {e}[/red]\n"
-            "Ensure your API key is valid and try again."
-        )
-        raise typer.Exit(1)
-
-    agent = ToolForgeAgent(config)
-
-    # Create minimal session for tool import (not used, but required by ForgeDeps)
-    from bioledger.ledger.models import LedgerSession
-    dummy_session = LedgerSession(name="tool_import_temp")
-    deps = ForgeDeps(session=dummy_session, config=config, context_mode="utility")
-
-    if suffix == ".nf":
-        spec = await import_nextflow_module(path, deps, agent, use_llm=True)
-    else:
-        console.print(f"[red]Unsupported file type for LLM import: {suffix}[/red]")
-        raise typer.Exit(1)
-
-    if name:
-        spec.execution.name = name
-
-    _finalize_tool_import(spec, dry_run=dry_run)
 
 
 @tool_app.command("validate")
@@ -389,39 +287,6 @@ def tool_show(name: str) -> None:
         for name, param in ex.parameters.items():
             default = f" = {param.default}" if param.default is not None else ""
             console.print(f"    {name}: {param.type.value}{default}")
-
-
-@tool_app.command("export")
-def tool_export(
-    name: str,
-    format: str = typer.Option("nextflow", help="Export format: 'nextflow' or 'galaxy'"),
-    output: Path = typer.Option(None, "-o", help="Output file (default: stdout)"),
-) -> None:
-    """Export a tool spec to Galaxy XML or Nextflow DSL2."""
-    from bioledger.toolspec.store import ToolStore
-
-    store = ToolStore()
-    try:
-        spec = store.load(name)
-    except KeyError:
-        console.print(f"[red]Tool '{name}' not found[/red]")
-        raise typer.Exit(1)
-
-    if format == "galaxy":
-        from bioledger.forges.toolforge.translators.galaxy import to_galaxy_xml
-        result = to_galaxy_xml(spec.execution)
-    elif format == "nextflow":
-        from bioledger.forges.toolforge.translators.nextflow import to_nextflow_process
-        result = to_nextflow_process(spec.execution)
-    else:
-        console.print(f"[red]Unknown format: {format}[/red]")
-        raise typer.Exit(1)
-
-    if output:
-        output.write_text(result)
-        console.print(f"[green]Written to {output}[/green]")
-    else:
-        console.print(result)
 
 
 @tool_app.command("search")
@@ -1174,9 +1039,6 @@ def _resolve_inputs(
 @app.command()
 def crystallize(
     session_id: str,
-    format: str = typer.Option(
-        "nextflow", help="Workflow format: 'nextflow' or 'galaxy'"
-    ),
     entry_ids: list[str] = typer.Option(
         None, "--entry", "-e", help="Specific entry IDs to include (default: all)"
     ),
@@ -1184,7 +1046,7 @@ def crystallize(
         False, "--include-running", help="Include jobs still running"
     ),
 ) -> None:
-    """Convert a session (or selected entries) into a reproducible workflow."""
+    """Convert a session (or selected entries) into a reproducible Nextflow workflow."""
     store = LedgerStore()
     session = store.load_session(session_id)
 
@@ -1197,14 +1059,10 @@ def crystallize(
         console.print(to_nextflow_from_entries(
             entries, include_running=include_running
         ))
-    elif format == "nextflow":
+    else:
         from bioledger.forges.analysisforge.crystallize import to_nextflow
 
         console.print(to_nextflow(session, include_running=include_running))
-    elif format == "galaxy":
-        from bioledger.forges.analysisforge.crystallize import to_galaxy_workflow
-
-        console.print(json.dumps(to_galaxy_workflow(session), indent=2))
 
 
 # --- Package ---

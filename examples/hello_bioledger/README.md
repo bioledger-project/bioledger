@@ -50,7 +50,7 @@ The ISA-Tab records the full experimental context: biological sources, derived s
 
 ### The tool spec
 
-`line_counter.bioledger.yaml` defines a trivial tool that counts lines in a text file (like an ISA-Tab study file). We're writing this by hand for the tutorial, but in practice **ToolForge can help** — import a Nextflow module (`bioledger tool import trimmomatic.nf`), search the Galaxy Tool Shed and nf-core modules (`bioledger tool search "fastqc"`), or ask the LLM to draft one from scratch in an interactive session. See the [tool discovery & import example](../galaxy_tool_import/) for a walkthrough.
+`line_counter.bioledger.yaml` defines a trivial tool that counts lines in a text file (like an ISA-Tab study file). We're writing this by hand for the tutorial, but in practice **ToolForge can help** — search the Galaxy Tool Shed and nf-core modules (`bioledger tool search "fastqc"`), or ask the LLM to draft one from scratch in an interactive session. See the [tool discovery example](../tool_discovery/) for a walkthrough.
 
 ## 3. Import and validate the tool
 
@@ -185,7 +185,6 @@ The `tool_run` entry's `parent_id` links back to the `data_import`, forming a DA
 
 ## Next steps
 
-- **Import real tools**: see the [Galaxy tool import example](../galaxy_tool_import/) for importing FastQC, Trimmomatic, etc.
+- **Discover real tools**: see the [tool discovery example](../tool_discovery/) for searching and running FastQC, Trimmomatic, etc.
 - **Chain tools**: run multiple tools in sequence — BioLedger auto-chains them via `parent_id`
-- **Export to Galaxy**: `bioledger crystallize <id> --format galaxy`
 - **Start from CSV**: have a CSV samplesheet instead of ISA-Tab? See the [CSV to ISA-Tab example](../csv_to_isatab/) — BioLedger converts it automatically

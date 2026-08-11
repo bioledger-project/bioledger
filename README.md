@@ -78,7 +78,7 @@ ISA-Tab to reproducible package without writing workflow syntax. See the [full w
 
 ### More examples
 
-- **[Tool discovery, import & export](examples/galaxy_tool_import/)** — search the Galaxy Tool Shed and nf-core modules, run discovered tools via their native engines, import Nextflow modules as specs, export to Galaxy XML or Nextflow DSL2
+- **[Tool discovery](examples/tool_discovery/)** — search the Galaxy Tool Shed and nf-core modules, run discovered tools via their native engines, import BioLedger YAML specs
 - **[CSV to ISA-Tab](examples/csv_to_isatab/)** — start from a plain samplesheet and convert to structured metadata
 - **[Variant calling on *L. donovani*](examples/variant_calling/)** — use the public library repos to discover tools and data, then run a full pipeline end-to-end
 - **Fan-out scatter** — run a tool across a collection of files using a workflow engine (requires `bioledger[snakemake]` or `bioledger[nextflow]`)
@@ -170,7 +170,7 @@ BioLedger is organized into **forges** — specialized modules that handle diffe
 | Forge | Purpose |
 |-------|---------|
 | **ISAForge** | ISA-Tab metadata generation and validation |
-| **ToolForge** | Tool spec management, translation (export to Galaxy XML / Nextflow DSL2), tool discovery (Tool Shed + nf-core search) |
+| **ToolForge** | Tool spec management, tool discovery (Tool Shed + nf-core search), spec authoring |
 | **AnalysisForge** | Interactive analysis, tool execution, workflow crystallization |
 | **CrateForge** | RO-Crate packaging with full provenance |
 | **Engines** | Multi-engine execution adapters (Snakemake, Nextflow, Galaxy) |
@@ -179,7 +179,7 @@ BioLedger is organized into **forges** — specialized modules that handle diffe
 
 ### ToolForge — Tool Spec Management
 
-ToolForge manages bioinformatics tool specifications. Import tools from Nextflow modules or BioLedger YAML, search the Galaxy Tool Shed and nf-core modules for new tools, validate specs, search the local store, and export to either Galaxy XML or Nextflow DSL2.
+ToolForge manages bioinformatics tool specifications. Import BioLedger YAML specs, search the Galaxy Tool Shed and nf-core modules for new tools, validate specs, and search the local store.
 
 ```bash
 # Search the Galaxy Tool Shed and nf-core modules
@@ -188,10 +188,7 @@ bioledger tool search "bwa" --source toolshed
 bioledger tool search "samtools" --source nfcore
 bioledger tool search "alignment" --source all
 
-# Import a Nextflow module
-bioledger tool import trimmomatic.nf
-
-# Import a BioLedger YAML spec directly
+# Import a BioLedger YAML spec
 bioledger tool import specs/samtools_sort.bioledger.yaml
 
 # Validate a spec (--strict treats warnings as errors)
@@ -206,10 +203,6 @@ bioledger tool list --search "fastqc"
 
 # Show tool details
 bioledger tool show fastqc
-
-# Export to Nextflow DSL2 or Galaxy XML
-bioledger tool export fastqc --format nextflow
-bioledger tool export fastqc --format galaxy -o fastqc_exported.xml
 ```
 
 #### Tool Discovery
@@ -275,14 +268,11 @@ you> quit
 
 #### Crystallize Workflows
 
-Convert a session's tool runs into a reproducible workflow:
+Convert a session's tool runs into a reproducible Nextflow workflow:
 
 ```bash
-# Generate Nextflow DSL2 (default)
+# Generate Nextflow DSL2
 bioledger crystallize <session_id>
-
-# Generate Galaxy workflow JSON
-bioledger crystallize <session_id> --format galaxy
 
 # Include only specific entries
 bioledger crystallize <session_id> --entry abc123 --entry def456
@@ -317,7 +307,7 @@ The resulting crate includes:
 
 For **multi-engine sessions** (entries from 2+ distinct executors, e.g. Docker + Snakemake), the crate uses a composite workflow entity as `mainEntity`:
 
-- Each engine's native artifact (`workflow.nf`, `*.smk`, `workflow.ga`) is included as a supplementary file
+- Each engine's native artifact (`workflow.nf`, `*.smk`) is included as a supplementary file
 - A synthesized composite workflow entity references them via `hasPart`
 - The dependency graph from the ledger is embedded in the composite entity's description
 
