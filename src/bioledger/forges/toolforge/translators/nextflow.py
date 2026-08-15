@@ -48,11 +48,14 @@ def to_nextflow_process(spec: ExecutionSpec) -> str:
     if params_lines:
         params_block = "// Default parameters\n" + "\n".join(params_lines) + "\n\n"
 
+    # Container directive — skip if empty (engine-only specs have no container)
+    container_line = ""
+    if spec.container:
+        container_line = f"    container '{spec.container}'\n\n"
+
     return f"""\
 {params_block}process {spec.name} {{
-    container '{spec.container}'
-
-    input:
+{container_line}    input:
 {chr(10).join(input_decls)}
 
     output:
@@ -71,7 +74,7 @@ def validate_nextflow_dsl2(nf_str: str) -> list[str]:
     if not re.search(r"process\s+\w+\s*\{", nf_str):
         issues.append("No process block found")
     if "container" not in nf_str:
-        issues.append("Missing container directive")
+        issues.append("Warning: Missing container directive (expected for engine-only processes)")
     if "input:" not in nf_str:
         issues.append("Missing input: block")
     if "output:" not in nf_str:

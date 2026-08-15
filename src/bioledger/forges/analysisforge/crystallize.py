@@ -198,10 +198,93 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
         return "echo 'render failed'"
 
 
+def _make_engine_nf_process(proc: str, entry: LedgerEntry) -> str:
+    """Build a Nextflow process block for an engine executor entry.
+
+    Handles snakemake, galaxy, and nextflow executors. These processes have
+    NO container or conda directive — the engine runs on the host and manages
+    its own containerized jobs. The script block invokes the engine CLI.
+    """
+    spec = entry.tool_spec_snapshot or {}
+    executor = entry.executor or ""
+
+    # Input names: prefer the tool spec's declared inputs; fall back to the
+    # recovered mapping from container volumes.
+    spec_inputs = spec.get("inputs") or {}
+    input_map = _input_name_to_filename(entry)
+    input_names = list(spec_inputs.keys()) or list(input_map.keys())
+    if not input_names:
+        input_decls = ["    path input"]
+    else:
+        input_decls = [f"    path {name}" for name in input_names]
+
+    # Output declarations: prefer concrete filenames from the recorded run;
+    # fall back to tool spec patterns.
+    output_files = _output_filenames(entry)
+    if output_files:
+        output_decls = [
+            f"    path '{f}', emit: out{idx}"
+            for idx, f in enumerate(output_files)
+        ]
+    else:
+        output_decls = []
+        for idx, out_def in enumerate((spec.get("outputs") or {}).values()):
+            pattern = out_def.get("pattern") or f"*.{out_def.get('format', 'out')}"
+            output_decls.append(f"    path '{pattern}', emit: out{idx}")
+        if not output_decls:
+            output_decls = ["    path '*', emit: out0"]
+
+    # Build the engine invocation script.
+    # For engine entries, the spec's command field contains the engine CLI
+    # invocation (e.g. "snakemake -s ...", "planemo run ...", "nextflow run ...").
+    # Render it with Jinja using Nextflow-style variables, same as docker/conda.
+    script = _render_script_for_nextflow(entry, input_names)
+
+    # Engine-specific comment for the process block
+    engine_comments = {
+        "snakemake": "// No container — snakemake runs on host, manages its own containers",
+        "galaxy": "// No container — planemo/galaxy runs on host, manages its own job execution",
+        "nextflow": "// No container — nextflow manages its own",
+    }
+    comment = engine_comments.get(executor, "// No container — engine runs on host")
+
+    return f"""
+process {proc} {{
+    {comment}
+    publishDir "results/{proc}", mode: 'copy'
+
+    input:
+{chr(10).join(input_decls)}
+
+    output:
+{chr(10).join(output_decls)}
+
+    script:
+    \"\"\"
+    {script}
+    \"\"\"
+}}"""
+
+
 def _make_nf_process(proc: str, entry: LedgerEntry) -> str:
-    """Build a single Nextflow process block from a ledger entry."""
+    """Build a single Nextflow process block from a ledger entry.
+
+    Dispatches engine executor entries (snakemake/galaxy/nextflow) to
+    _make_engine_nf_process before any container/conda directive logic.
+    Only docker/conda entries proceed to the existing logic.
+    """
+    if entry.executor in ("snakemake", "galaxy", "nextflow"):
+        return _make_engine_nf_process(proc, entry)
+
     image = entry.container.image if entry.container else "ubuntu:latest"
     spec = entry.tool_spec_snapshot or {}
+
+    # Determine environment directive: conda vs container
+    if entry.executor == "conda":
+        conda_deps = spec.get("conda_deps", [])
+        env_line = f'    conda "{" ".join(conda_deps)}"'
+    else:
+        env_line = f"    container '{image}'"
 
     # Input names: prefer the tool spec's declared inputs; fall back to the
     # recovered mapping from container volumes.
@@ -234,7 +317,7 @@ def _make_nf_process(proc: str, entry: LedgerEntry) -> str:
 
     return f"""
 process {proc} {{
-    container '{image}'
+{env_line}
     publishDir "results/{proc}", mode: 'copy'
 
     input:
@@ -248,6 +331,73 @@ process {proc} {{
     {script}
     \"\"\"
 }}"""
+
+
+def _detect_engine_versions(entries: list[LedgerEntry]) -> dict[str, str]:
+    """Detect installed engine versions for entries that use them.
+
+    Returns a dict mapping engine name to version string (or 'not installed').
+    Detection is best-effort — if an engine binary isn't found, emits a
+    placeholder string rather than failing.
+    """
+    import shutil
+    import subprocess
+
+    engines_needed: set[str] = set()
+    for entry in entries:
+        if entry.executor in ("snakemake", "galaxy", "nextflow"):
+            engines_needed.add(entry.executor)
+
+    versions: dict[str, str] = {}
+    version_cmds = {
+        "snakemake": ["snakemake", "--version"],
+        "nextflow": ["nextflow", "-version"],
+        "galaxy": ["planemo", "--version"],
+    }
+    for engine in engines_needed:
+        cmd = version_cmds.get(engine)
+        if not cmd or shutil.which(cmd[0]) is None:
+            versions[engine] = "not installed (version unknown)"
+            continue
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=10,
+            )
+            output = (result.stdout or result.stderr).strip()
+            versions[engine] = output.split("\n")[0] if output else "unknown"
+        except Exception:
+            versions[engine] = "not installed (version unknown)"
+    return versions
+
+
+def generate_engine_env_yml(entries: list[LedgerEntry]) -> str | None:
+    """Generate an engine-env.yml conda env file for engine entries.
+
+    Returns None if no engine entries are present. The YAML pins engine
+    versions detected on the current machine. If an engine isn't installed,
+    emits a comment instead of a dependency line.
+    """
+    versions = _detect_engine_versions(entries)
+    if not versions:
+        return None
+
+    lines = [
+        "# Auto-generated by BioLedger — engine runtime environment",
+        "# Create with: conda env create -f engine-env.yml",
+        "name: bioledger-engines",
+        "channels:",
+        "  - bioconda",
+        "  - conda-forge",
+        "dependencies:",
+    ]
+    for engine, version in sorted(versions.items()):
+        if version.startswith("not installed"):
+            lines.append(f"  # {engine}: {version}")
+        else:
+            parts = version.split()
+            ver = parts[-1] if parts else "latest"
+            lines.append(f"  - {engine}={ver}")
+    return "\n".join(lines) + "\n"
 
 
 def _render_workflow(ordered: list[LedgerEntry]) -> str:

@@ -22,10 +22,12 @@ session_app = typer.Typer(help="Manage analysis sessions")
 tool_app = typer.Typer(help="Manage tool specifications")
 library_app = typer.Typer(help="Browse and import from the tool library")
 study_app = typer.Typer(help="Browse and load ISA-Tab studies")
+config_app = typer.Typer(help="Validate and inspect configuration")
 app.add_typer(session_app, name="session")
 app.add_typer(tool_app, name="tool")
 app.add_typer(library_app, name="library")
 app.add_typer(study_app, name="study")
+app.add_typer(config_app, name="config")
 console = Console()
 
 
@@ -507,9 +509,14 @@ async def _analysis_chat(session_id: str) -> None:
                 entry_ids = [eid.strip() for eid in selection.split(",")]
 
             from bioledger.forges.crateforge.builder import build_rocrate
+            from bioledger.forges.analysisforge.executor import get_session_dir
 
             output_dir = config.home_dir / "crates" / session.id
-            crate_dir = build_rocrate(session, output_dir, entry_ids=entry_ids)
+            session_dir = get_session_dir(config.home_dir, session.id)
+            crate_dir = build_rocrate(
+                session, output_dir, entry_ids=entry_ids,
+                session_dir=session_dir,
+            )
             console.print(f"[green]RO-Crate written to {crate_dir}[/green]")
 
             response = (
@@ -1083,6 +1090,7 @@ def package(
 ) -> None:
     """Package a session (or selected entries) into an RO-Crate."""
     from bioledger.config import BioLedgerConfig
+    from bioledger.forges.analysisforge.executor import get_session_dir
     from bioledger.forges.crateforge.builder import build_rocrate
 
     config = BioLedgerConfig()
@@ -1092,9 +1100,11 @@ def package(
     if output_dir is None:
         output_dir = config.home_dir / "crates" / session_id
 
+    session_dir = get_session_dir(config.home_dir, session_id)
     crate_dir = build_rocrate(
         session, output_dir, entry_ids=entry_ids,
         include_running=include_running,
+        session_dir=session_dir,
     )
     console.print(f"[green]RO-Crate written to {crate_dir}[/green]")
     console.print(
@@ -1337,6 +1347,25 @@ def study_refresh() -> None:
     lib.refresh()
     entries = lib.list_all()
     console.print(f"[green]Refreshed: {len(entries)} studies available[/green]")
+
+
+# --- Config ---
+
+
+@config_app.command("validate")
+def config_validate() -> None:
+    """Validate engine configs for common mistakes and mismatches."""
+    from bioledger.config import BioLedgerConfig
+    from bioledger.core.engines.validate import (
+        format_warnings,
+        validate_engine_config,
+    )
+
+    config = BioLedgerConfig()
+    result = validate_engine_config(config.engines)
+    console.print(format_warnings(result))
+    if not result.ok:
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
