@@ -54,6 +54,10 @@ galaxy = [
 snakemake = [
     "snakemake>=8.0",
 ]
+nextflow = []
+# Nextflow is a Java binary, not a Python package. This extra is a marker
+# so that `pip install bioledger[nextflow]` succeeds and error messages
+# can reference it. Users install Nextflow separately (conda, homebrew, etc.).
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
