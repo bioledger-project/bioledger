@@ -79,6 +79,38 @@ class TestEngineConfig:
         assert ec.extra_args == ["--latency-wait", "60"]
 
 
+class TestSnakemakeEngineConfig:
+    """J5/K1: SnakemakeEngineConfig should have container_runtime and jobs fields."""
+
+    def test_default_container_runtime(self):
+        smk = SnakemakeEngineConfig()
+        assert smk.container_runtime == "apptainer"
+
+    def test_default_jobs(self):
+        smk = SnakemakeEngineConfig()
+        assert smk.jobs == 1
+
+    def test_custom_container_runtime(self):
+        smk = SnakemakeEngineConfig(container_runtime="singularity")
+        assert smk.container_runtime == "singularity"
+
+    def test_conda_runtime(self):
+        smk = SnakemakeEngineConfig(container_runtime="conda")
+        assert smk.container_runtime == "conda"
+
+    def test_none_runtime(self):
+        smk = SnakemakeEngineConfig(container_runtime="none")
+        assert smk.container_runtime == "none"
+
+    def test_invalid_runtime(self):
+        with pytest.raises(ValidationError):
+            SnakemakeEngineConfig(container_runtime="docker")
+
+    def test_custom_jobs(self):
+        smk = SnakemakeEngineConfig(jobs=8)
+        assert smk.jobs == 8
+
+
 class TestDependencyGraph:
     def _make_entry(
         self,

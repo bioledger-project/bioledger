@@ -261,3 +261,80 @@ def test_to_nextflow_from_entries_independent_roots():
     assert "step_1_hisat2.out" not in result
     # No bogus warning about parallel independent runs
     assert "WARNING" not in result
+
+
+def test_conda_entry_emits_conda_directive():
+    """Conda executor entries should emit a conda directive, not a container line."""
+    entry = _make_entry(
+        tool_name="samtools_sort_conda",
+        image="conda:bioledger_abc123",
+    )
+    entry.executor = "conda"
+    entry.tool_spec_snapshot = {
+        "name": "samtools_sort_conda",
+        "conda_deps": ["samtools=1.17"],
+        "command": "samtools sort -o sorted.bam input.bam",
+        "inputs": {},
+        "outputs": {},
+        "status": "valid",
+    }
+
+    result = to_nextflow_from_entries([entry])
+    assert 'conda "samtools=1.17"' in result
+    assert "container 'conda:" not in result
+
+
+def test_engine_entry_no_container_directive():
+    """Engine executor entries (snakemake/galaxy/nextflow) should produce
+    a Nextflow process WITHOUT a container or conda directive."""
+    entry = _make_entry(
+        tool_name="samtools_sort_snakemake",
+        image="",
+    )
+    entry.executor = "snakemake"
+    entry.tool_spec_snapshot = {
+        "name": "samtools_sort_snakemake",
+        "command": "samtools sort -o sorted.bam input.bam",
+        "inputs": {},
+        "outputs": {},
+        "status": "valid",
+    }
+
+    result = to_nextflow_from_entries([entry])
+    assert "process step_0_" in result
+    # Should not have an actual container directive (the comment is OK)
+    assert "container '" not in result
+    assert 'container "' not in result
+    assert "conda " not in result
+
+
+def test_mixed_docker_and_engine_entries():
+    """Docker + engine entries should produce a single workflow.nf with
+    container directives for docker entries and none for engine entries."""
+    e1 = _make_entry(
+        tool_name="fastqc",
+        output_files=["qc.html"],
+    )
+    e2 = _make_entry(
+        tool_name="samtools_sort_snakemake",
+        image="",
+        parent_id=e1.id,
+        input_mapping={"input": "qc.html"},
+        output_files=["sorted.bam"],
+    )
+    e2.executor = "snakemake"
+    e2.tool_spec_snapshot = {
+        "name": "samtools_sort_snakemake",
+        "command": "samtools sort",
+        "inputs": {},
+        "outputs": {},
+        "status": "valid",
+    }
+
+    result = to_nextflow_from_entries([e1, e2])
+    assert "step_0_fastqc" in result
+    assert "step_1_samtools_sort_snakemake" in result
+    # Docker entry should have container
+    # Engine entry should NOT have container
+    # Both should be in the same workflow block
+    assert "workflow {" in result

@@ -1,9 +1,10 @@
-"""Tests for multi-engine RO-Crate builder (Phase 4).
+"""Tests for RO-Crate builder (unified crystallization).
 
 Validates:
-- Single-engine sessions (docker/conda) keep the existing Nextflow mainEntity path
-- Multi-engine sessions produce a composite mainEntity with hasPart references
-- Engine artifacts (workflow.nf, *.smk) are added as supplementary files
+- All sessions (single/multi-engine) produce a single workflow.nf as mainEntity
+- Engine-specific supplementary files (.smk, tool XML, nf-core modules) are included
+- engine-env.yml is generated when engine entries are present
+- nextflow.config uses profile-based container runtime selection
 - ledger.json is always included
 - Data files from entries are included
 """
@@ -13,9 +14,6 @@ from __future__ import annotations
 import json
 
 from bioledger.forges.crateforge.builder import (
-    _build_composite_entity,
-    _detect_executors,
-    _is_single_engine,
     build_rocrate,
 )
 from bioledger.ledger.models import (
@@ -63,88 +61,33 @@ def _make_entry(
     )
 
 
-class TestDetectExecutors:
-    def test_single_docker(self):
-        entries = [_make_entry(executor="docker")]
-        assert _detect_executors(entries) == {"docker"}
-
-    def test_mixed_docker_snakemake(self):
-        entries = [
-            _make_entry(tool_name="fastqc", executor="docker"),
-            _make_entry(tool_name="samtools_sort", executor="snakemake"),
-        ]
-        assert _detect_executors(entries) == {"docker", "snakemake"}
-
-    def test_skips_non_tool_entries(self):
-        entries = [
-            _make_entry(executor="docker"),
-            LedgerEntry(kind=EntryKind.DATA_IMPORT),
-        ]
-        assert _detect_executors(entries) == {"docker"}
-
-
-class TestIsSingleEngine:
-    def test_docker_only(self):
-        assert _is_single_engine({"docker"}) is True
-
-    def test_conda_only(self):
-        assert _is_single_engine({"conda"}) is True
-
-    def test_docker_conda(self):
-        assert _is_single_engine({"docker", "conda"}) is True
-
-    def test_docker_snakemake(self):
-        assert _is_single_engine({"docker", "snakemake"}) is False
-
-    def test_empty(self):
-        assert _is_single_engine(set()) is True
-
-
-class TestBuildRocrateSingleEngine:
-    """Single-engine sessions should use the existing Nextflow mainEntity path."""
+class TestBuildRocrateSingleWorkflow:
+    """All sessions should produce a single workflow.nf as mainEntity."""
 
     def test_single_docker_entry(self, tmp_path):
         session = LedgerSession(name="test")
         session.add(_make_entry(
             tool_name="fastqc",
-            output_files=["reads_fastqc.html"],
+            executor="docker",
+            output_files=["qc.html"],
         ))
         crate_dir = build_rocrate(session, tmp_path)
         assert crate_dir.exists()
+        assert (crate_dir / "ledger.json").exists()
+        assert (crate_dir / "workflow.nf").exists()
+
         metadata = json.loads((crate_dir / "ro-crate-metadata.json").read_text())
         graph = metadata["@graph"]
-        main_entities = [
-            e for e in graph
-            if "mainEntity" in e and e.get("mainEntity")
-        ]
-        assert len(main_entities) >= 1
-        main_ref = main_entities[0]["mainEntity"]
+        root = next(e for e in graph if e.get("@id") == "./")
+        main_ref = root["mainEntity"]
         main_id = main_ref["@id"] if isinstance(main_ref, dict) else main_ref
         assert "workflow.nf" in main_id
 
-    def test_includes_ledger_json(self, tmp_path):
-        session = LedgerSession(name="test")
-        session.add(_make_entry())
-        crate_dir = build_rocrate(session, tmp_path)
-        assert (crate_dir / "ledger.json").exists()
-
-    def test_includes_nextflow_config(self, tmp_path):
-        session = LedgerSession(name="test")
-        session.add(_make_entry())
-        crate_dir = build_rocrate(session, tmp_path)
-        assert (crate_dir / "nextflow.config").exists()
-
-    def test_empty_session(self, tmp_path):
-        session = LedgerSession(name="empty")
-        crate_dir = build_rocrate(session, tmp_path)
-        assert crate_dir.exists()
-        assert (crate_dir / "ledger.json").exists()
-
 
 class TestBuildRocrateMultiEngine:
-    """Multi-engine sessions should produce a composite mainEntity."""
+    """Multi-engine sessions also produce a single workflow.nf (unified)."""
 
-    def test_docker_plus_snakemake_composite(self, tmp_path):
+    def test_docker_plus_snakemake_single_workflow(self, tmp_path):
         session = LedgerSession(name="multi")
         e1 = _make_entry(
             tool_name="fastqc",
@@ -160,108 +103,43 @@ class TestBuildRocrateMultiEngine:
                 "name": "samtools_sort",
                 "container": "quay.io/biocontainers/samtools:1.17",
                 "command": "samtools sort -o sorted.bam input.bam",
-                "inputs": {},
-                "outputs": {},
-                "status": "valid",
+                "inputs": {}, "outputs": {}, "status": "valid",
             },
         )
         session.add(e2)
 
         crate_dir = build_rocrate(session, tmp_path)
+        assert (crate_dir / "workflow.nf").exists()
+
         metadata = json.loads((crate_dir / "ro-crate-metadata.json").read_text())
         graph = metadata["@graph"]
-
-        # Find the root entity's mainEntity
         root = next(e for e in graph if e.get("@id") == "./")
         main_ref = root["mainEntity"]
         main_id = main_ref["@id"] if isinstance(main_ref, dict) else main_ref
-        assert "composite-workflow" in main_id
+        assert "workflow.nf" in main_id
 
-        # The composite entity should have hasPart
-        composite = next(
-            e for e in graph if e.get("@id") == "composite-workflow"
-        )
-        assert "hasPart" in composite
-        part_ids = [
-            p["@id"] if isinstance(p, dict) else p
-            for p in composite["hasPart"]
-        ]
-        # Should have at least the docker (workflow.nf) and snakemake artifacts
-        assert len(part_ids) >= 2
-
-    def test_composite_has_dependency_info(self, tmp_path):
-        session = LedgerSession(name="deps")
-        e1 = _make_entry(
-            tool_name="fastqc",
-            executor="docker",
-            output_files=["output.html"],
-        )
-        session.add(e1)
-        e2 = _make_entry(
-            tool_name="hisat2",
+    def test_multi_engine_includes_engine_env_yml(self, tmp_path):
+        session = LedgerSession(name="multi")
+        session.add(_make_entry(executor="docker"))
+        session.add(_make_entry(
             executor="snakemake",
-            input_mapping={"input": "output.html"},
-            parent_id=e1.id,
-            output_files=["aligned.bam"],
             spec_snapshot={
-                "name": "hisat2",
-                "container": "quay.io/biocontainers/hisat2:2.2.1",
-                "command": "hisat2 -x ref -f input",
-                "inputs": {},
-                "outputs": {},
-                "status": "valid",
-            },
-        )
-        session.add(e2)
-
-        crate_dir = build_rocrate(session, tmp_path)
-        metadata = json.loads((crate_dir / "ro-crate-metadata.json").read_text())
-        graph = metadata["@graph"]
-        composite = next(
-            e for e in graph if e.get("@id") == "composite-workflow"
-        )
-        desc = composite.get("description", "")
-        assert "fastqc" in desc
-        assert "hisat2" in desc
-        assert "docker" in desc
-        assert "snakemake" in desc
-
-    def test_three_engines_composite(self, tmp_path):
-        """docker + snakemake + nextflow entries → composite with 3 parts."""
-        session = LedgerSession(name="triple")
-        session.add(_make_entry(
-            tool_name="fastqc", executor="docker",
-            output_files=["qc.html"],
-        ))
-        session.add(_make_entry(
-            tool_name="samtools_sort", executor="snakemake",
-            output_files=["sorted.bam"],
-            spec_snapshot={
-                "name": "samtools_sort",
-                "container": "quay.io/biocontainers/samtools:1.17",
-                "command": "samtools sort",
+                "name": "tool", "container": "img",
+                "command": "echo hi",
                 "inputs": {}, "outputs": {}, "status": "valid",
             },
         ))
-        session.add(_make_entry(
-            tool_name="nf_pipeline", executor="nextflow",
-            output_files=["results.txt"],
-        ))
-
         crate_dir = build_rocrate(session, tmp_path)
-        metadata = json.loads((crate_dir / "ro-crate-metadata.json").read_text())
-        graph = metadata["@graph"]
-        composite = next(
-            e for e in graph if e.get("@id") == "composite-workflow"
-        )
-        part_ids = [
-            p["@id"] if isinstance(p, dict) else p
-            for p in composite["hasPart"]
-        ]
-        assert len(part_ids) >= 3
+        assert (crate_dir / "engine-env.yml").exists()
 
-    def test_composite_includes_ledger(self, tmp_path):
-        """ledger.json should always be present, even in multi-engine crates."""
+    def test_no_engine_env_yml_for_docker_only(self, tmp_path):
+        session = LedgerSession(name="docker_only")
+        session.add(_make_entry(executor="docker"))
+        crate_dir = build_rocrate(session, tmp_path)
+        assert not (crate_dir / "engine-env.yml").exists()
+
+    def test_multi_engine_includes_ledger(self, tmp_path):
+        """ledger.json should always be present."""
         session = LedgerSession(name="multi")
         session.add(_make_entry(executor="docker"))
         session.add(_make_entry(
@@ -275,9 +153,8 @@ class TestBuildRocrateMultiEngine:
         crate_dir = build_rocrate(session, tmp_path)
         assert (crate_dir / "ledger.json").exists()
 
-    def test_single_snakemake_not_composite(self, tmp_path):
-        """A single snakemake entry (no docker) should still get composite
-        since it's not docker/conda single-engine."""
+    def test_single_snakemake_produces_workflow_nf(self, tmp_path):
+        """A single snakemake entry should produce workflow.nf (not composite)."""
         session = LedgerSession(name="snake_only")
         session.add(_make_entry(
             tool_name="samtools_sort", executor="snakemake",
@@ -290,55 +167,112 @@ class TestBuildRocrateMultiEngine:
             },
         ))
         crate_dir = build_rocrate(session, tmp_path)
+        assert (crate_dir / "workflow.nf").exists()
+
         metadata = json.loads((crate_dir / "ro-crate-metadata.json").read_text())
         graph = metadata["@graph"]
         root = next(e for e in graph if e.get("@id") == "./")
         main_ref = root["mainEntity"]
         main_id = main_ref["@id"] if isinstance(main_ref, dict) else main_ref
-        # Single snakemake → not _is_single_engine → composite path
-        assert "composite-workflow" in main_id
+        assert "workflow.nf" in main_id
 
 
-class TestCompositeEntity:
-    """Unit tests for _build_composite_entity."""
+class TestGalaxyNoPlaceholder:
+    """Galaxy entries should NOT produce a markdown placeholder — they are
+    included as Nextflow processes in the unified workflow.nf."""
 
-    def test_has_part_references(self, tmp_path):
-        from rocrate.rocrate import ROCrate
+    def test_galaxy_no_markdown_placeholder(self, tmp_path):
+        session = LedgerSession(name="galaxy_test")
+        session.add(_make_entry(
+            tool_name="seqtk_galaxy", executor="galaxy",
+            output_files=["output.fa"],
+            spec_snapshot={
+                "name": "seqtk_galaxy",
+                "version": "1.0",
+                "command": "planemo run tool.xml",
+                "inputs": {}, "outputs": {}, "status": "valid",
+            },
+        ))
 
-        crate = ROCrate()
+        crate_dir = build_rocrate(session, tmp_path)
+        assert not (crate_dir / "galaxy_steps.md").exists()
+        assert (crate_dir / "workflow.nf").exists()
+
+
+class TestProfileBasedConfig:
+    """K2: nextflow.config should use profile-based container runtime selection."""
+
+    def test_docker_profile_enabled_for_docker_entries(self, tmp_path):
+        session = LedgerSession(name="docker_only")
+        session.add(_make_entry(
+            tool_name="fastqc", executor="docker",
+            output_files=["qc.html"],
+        ))
+        crate_dir = build_rocrate(session, tmp_path)
+        config = (crate_dir / "nextflow.config").read_text()
+        assert "docker {" in config
+        assert "docker.enabled = true" in config
+
+    def test_conda_profile_enabled_for_conda_entries(self, tmp_path):
+        session = LedgerSession(name="conda_config")
+        session.add(_make_entry(
+            tool_name="samtools_sort", executor="conda",
+            output_files=["sorted.bam"],
+            spec_snapshot={
+                "name": "samtools_sort_conda",
+                "conda_deps": ["samtools=1.17"],
+                "command": "samtools sort",
+                "inputs": {}, "outputs": {}, "status": "valid",
+            },
+        ))
+        crate_dir = build_rocrate(session, tmp_path)
+        config = (crate_dir / "nextflow.config").read_text()
+        assert "conda {" in config
+        assert "conda.enabled = true" in config
+
+    def test_conda_commented_when_only_docker(self, tmp_path):
+        session = LedgerSession(name="docker_only_config")
+        session.add(_make_entry(
+            tool_name="fastqc", executor="docker",
+            output_files=["qc.html"],
+        ))
+        crate_dir = build_rocrate(session, tmp_path)
+        config = (crate_dir / "nextflow.config").read_text()
+        assert "// conda {" in config
+
+    def test_singularity_always_available(self, tmp_path):
         session = LedgerSession(name="test")
-        entries = [_make_entry(executor="docker"), _make_entry(executor="snakemake")]
-        for e in entries:
-            session.add(e)
+        session.add(_make_entry(executor="docker"))
+        crate_dir = build_rocrate(session, tmp_path)
+        config = (crate_dir / "nextflow.config").read_text()
+        assert "singularity {" in config
+        assert "singularity.enabled = true" in config
 
-        composite = _build_composite_entity(
-            crate, ["workflow.nf", "samtools_sort.smk"], session, entries
-        )
-        assert composite.id == "composite-workflow"
-        has_part = composite["hasPart"]
-        assert len(has_part) == 2
-        part_ids = [p["@id"] if isinstance(p, dict) else p for p in has_part]
-        assert "workflow.nf" in part_ids
-        assert "samtools_sort.smk" in part_ids
-
-    def test_description_includes_step_info(self, tmp_path):
-        from rocrate.rocrate import ROCrate
-
-        crate = ROCrate()
+    def test_slurm_example_commented(self, tmp_path):
         session = LedgerSession(name="test")
-        e1 = _make_entry(tool_name="fastqc", executor="docker")
-        session.add(e1)
-        e2 = _make_entry(
-            tool_name="hisat2", executor="snakemake",
-            parent_id=e1.id,
-        )
-        session.add(e2)
+        session.add(_make_entry(executor="docker"))
+        crate_dir = build_rocrate(session, tmp_path)
+        config = (crate_dir / "nextflow.config").read_text()
+        assert "// slurm {" in config
 
-        composite = _build_composite_entity(
-            crate, ["workflow.nf", "hisat2.smk"], session, [e1, e2]
-        )
-        desc = composite["description"]
-        assert "fastqc" in desc
-        assert "hisat2" in desc
-        assert "docker" in desc
-        assert "snakemake" in desc
+    def test_profiles_block_present(self, tmp_path):
+        session = LedgerSession(name="test")
+        session.add(_make_entry(executor="docker"))
+        crate_dir = build_rocrate(session, tmp_path)
+        config = (crate_dir / "nextflow.config").read_text()
+        assert "profiles {" in config
+
+    def test_engine_env_yml_referenced_when_engine_present(self, tmp_path):
+        session = LedgerSession(name="multi")
+        session.add(_make_entry(executor="docker"))
+        session.add(_make_entry(
+            executor="snakemake",
+            spec_snapshot={
+                "name": "tool", "container": "img",
+                "command": "echo hi",
+                "inputs": {}, "outputs": {}, "status": "valid",
+            },
+        ))
+        crate_dir = build_rocrate(session, tmp_path)
+        config = (crate_dir / "nextflow.config").read_text()
+        assert "engine-env.yml" in config
