@@ -1,9 +1,14 @@
-"""Conda dependency → container image auto-derivation.
+"""Conda dependency → container image auto-derivation (Docker executor only).
 
 Resolves ``conda_deps`` (a list of conda package specs like ``["samtools=1.17"]``)
 to a fully-qualified container image URL, so that toolspecs using ``conda_deps``
 instead of an explicit ``container`` field can be used for fan-out via
 ``generate()``.
+
+This module is exclusively for the **Docker executor's** auto-derive-image-from-
+conda_deps path. Native conda execution (``executors: [conda]``) uses
+``conda_deps`` directly to build an environment via ``CondaRunner``
+(``bioledger.core.conda_runner``), never calling this module.
 
 Two strategies:
 - **Single-package tools**: use ``lookup_biocontainers_tag`` from

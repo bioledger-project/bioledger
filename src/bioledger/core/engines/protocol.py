@@ -107,8 +107,11 @@ class ExecutionAdapter(Protocol):
 
     Implemented by:
     - ``DockerRunnerFacade``: wraps the existing DockerRunner for single-tool
-      runs. ``submit_spec()``/``poll()``/``collect()`` are functional;
+      Docker runs. ``submit_spec()``/``poll()``/``collect()`` are functional;
       ``generate()``/``submit()`` raise NotImplementedError (Docker can't fan-out).
+    - ``CondaRunnerFacade``: wraps CondaRunner for native conda single-tool
+      runs. Same surface as DockerRunnerFacade — ``poll()``/``collect()``
+      functional, ``submit_spec()``/``generate()``/``submit()`` raise.
     - ``SnakemakeAdapter`` (Phase 2): full implementation.
     - ``NextflowAdapter`` (Phase 5): full implementation.
     - ``GalaxyAdapter`` (Phase 5): full implementation.

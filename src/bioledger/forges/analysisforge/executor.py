@@ -5,11 +5,13 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from bioledger.core.conda_runner import CondaRunner
 from bioledger.core.containers.docker import DockerRunner, RunResult
 from bioledger.ledger.models import (
     ContainerInfo,
@@ -29,6 +31,38 @@ from bioledger.toolspec.models import (
 
 # File names used when persisting container stdout/stderr to disk.
 _LOG_NAMES = ("stdout.log", "stderr.log")
+
+
+def _resolve_runner_kind(spec: ToolSpec) -> Literal["docker", "conda"]:
+    """Determine whether to use Docker or Conda for a single-tool spec."""
+    executors = spec.execution.executors or ["docker"]
+    if "docker" in executors:
+        return "docker"
+    if "conda" in executors:
+        return "conda"
+    raise ValueError(
+        f"Spec '{spec.name}' has no docker/conda executor (executors={executors}) — "
+        "run_tool()/submit_tool() only handle docker/conda; engine-only specs "
+        "must go through submit_fanout()."
+    )
+
+
+def _poll_runner(
+    runner: DockerRunner | CondaRunner,
+    run_handle_id: str,
+    run_dir: Path,
+    expected_start_time: float | None = None,
+) -> RunResult | None:
+    """Poll a runner uniformly, handling the CondaRunner.workdir arg.
+
+    CondaRunner.poll takes (pid, workdir, expected_start_time);
+    DockerRunner.poll takes only (container_id). We distinguish by
+    checking for CondaRunner's 'ensure_env' method (duck-typing),
+    which works with both real instances and MagicMock(spec=...) mocks.
+    """
+    if hasattr(runner, "ensure_env"):
+        return runner.poll(run_handle_id, run_dir, expected_start_time)
+    return runner.poll(run_handle_id)
 
 
 def _persist_logs(run_dir: Path, result: RunResult) -> set[str]:
@@ -330,6 +364,9 @@ def _finalize_entry(
     snapshot_path = run_dir / "_pre_snapshot.json"
     if snapshot_path.exists():
         log_paths.add(str(snapshot_path.resolve()))
+    start_time_path = run_dir / "_process_start_time.json"
+    if start_time_path.exists():
+        log_paths.add(str(start_time_path.resolve()))
 
     output_paths = _discover_outputs(
         spec, run_dir, pre_snapshot, staged_input_paths, exclude_paths=log_paths
@@ -365,7 +402,7 @@ def _submit_and_stage(
     session_dir: Path,
     params: dict | None,
     parent_id: str | None,
-) -> tuple[LedgerEntry, Path, dict[str, float], set[str], DockerRunner]:
+) -> tuple[LedgerEntry, Path, dict[str, float], set[str], DockerRunner | CondaRunner]:
     """Shared setup for submit_tool()/run_tool(): stage inputs, snapshot the
     run dir BEFORE starting the container (so fast-finishing tools don't
     race the pre-snapshot), then start the container.
@@ -375,7 +412,7 @@ def _submit_and_stage(
     once the container completes; submit_tool() discards them since
     poll_tool() reconstructs an equivalent snapshot later from disk.
     """
-    runner = DockerRunner()
+    kind = _resolve_runner_kind(spec)
 
     run_id = uuid.uuid4().hex[:20]
     run_dir = session_dir / "runs" / run_id
@@ -395,24 +432,63 @@ def _submit_and_stage(
     # (which is fragile if a tool modifies its inputs in-place).
     (run_dir / "_pre_snapshot.json").write_text(json.dumps(pre_snapshot))
 
-    # Mount full session dir so relative symlinks to sibling run dirs resolve.
+    rendered_cmd = _render_command(
+        spec, input_mapping, params or {}, work_mount=str(run_dir)
+    )
+    command = _to_shell_command(rendered_cmd)
+
+    if kind == "conda":
+        runner = CondaRunner()
+        env_name = runner.ensure_env(spec.execution.conda_deps)
+        pid_str = runner.submit(
+            conda_env=env_name,
+            command=command,
+            workdir=run_dir,
+        )
+        # Persist process start time for PID-recycling guard in poll_tool()
+        try:
+            import psutil
+            start_time = psutil.Process(int(pid_str)).create_time()
+            (run_dir / "_process_start_time.json").write_text(json.dumps(start_time))
+        except Exception:
+            pass
+        file_refs = _build_input_file_refs(input_mapping, run_dir)
+        entry = LedgerEntry(
+            id=run_id,
+            kind=EntryKind.TOOL_RUN,
+            parent_id=parent_id,
+            tool_spec_name=spec.name,
+            tool_spec_snapshot=spec.execution.model_dump(),
+            container=ContainerInfo(
+                image=f"conda:{env_name}",
+                command=command,
+                volumes={},
+                input_mapping=input_mapping,
+            ),
+            files=file_refs,
+            params=params or {},
+            run_status="running",
+            run_handle_id=pid_str,
+            executor="conda",
+        )
+        session.add(entry)
+        return entry, run_dir, pre_snapshot, staged_input_paths, runner
+
+    # docker
+    runner = DockerRunner()
     volumes = {str(session_dir): {"bind": "/sessions", "mode": "rw"}}
     container_run_dir = f"/sessions/runs/{run_id}"
-
     rendered_cmd = _render_command(
         spec, input_mapping, params or {}, work_mount=container_run_dir
     )
     command = _to_shell_command(rendered_cmd)
-
     container_id = runner.submit(
         image=spec.container,
         command=command,
         volumes=volumes,
         workdir=container_run_dir,
     )
-
     file_refs = _build_input_file_refs(input_mapping, run_dir)
-
     entry = LedgerEntry(
         id=run_id,
         kind=EntryKind.TOOL_RUN,
@@ -429,6 +505,7 @@ def _submit_and_stage(
         params=params or {},
         run_status="running",
         run_handle_id=container_id,
+        executor="docker",
     )
     session.add(entry)
     return entry, run_dir, pre_snapshot, staged_input_paths, runner
@@ -469,12 +546,20 @@ def poll_tool(entry: LedgerEntry, session_dir: Path) -> LedgerEntry:
     if entry.run_status != "running" or not entry.run_handle_id:
         return entry
 
-    runner = DockerRunner()
-    result = runner.poll(entry.run_handle_id)
+    executor = entry.executor or "docker"
+    run_dir = session_dir / "runs" / entry.id
+    runner = CondaRunner() if executor == "conda" else DockerRunner()
+
+    # Read persisted process start time for PID-recycling guard (conda only)
+    start_time_path = run_dir / "_process_start_time.json"
+    expected_start_time = (
+        json.loads(start_time_path.read_text()) if start_time_path.exists() else None
+    )
+
+    result = _poll_runner(runner, entry.run_handle_id, run_dir, expected_start_time)
     if result is None:
         return entry
 
-    run_dir = session_dir / "runs" / entry.id
     spec = ToolSpec(execution=ExecutionSpec(**(entry.tool_spec_snapshot or {})))
     input_mapping = entry.container.input_mapping if entry.container else {}
     staged_input_paths = {
@@ -530,26 +615,35 @@ def run_tool(
     )
 
     start = time.monotonic()
-    result = runner.poll(entry.run_handle_id)
+    result = _poll_runner(runner, entry.run_handle_id, run_dir)
     while result is None:
         if time.monotonic() - start > timeout:
-            try:
-                container = runner.client.containers.get(entry.run_handle_id)
-                container.kill()
-            except Exception:
-                pass
-            try:
-                container = runner.client.containers.get(entry.run_handle_id)
-                container.remove(force=True)
-            except Exception:
-                pass
+            # Docker runners have a 'client' attribute; CondaRunners don't.
+            # Use getattr instead of isinstance so mocked runners work.
+            docker_client = getattr(runner, "client", None)
+            if docker_client is not None:
+                try:
+                    container = runner.client.containers.get(entry.run_handle_id)
+                    container.kill()
+                except Exception:
+                    pass
+                try:
+                    container = runner.client.containers.get(entry.run_handle_id)
+                    container.remove(force=True)
+                except Exception:
+                    pass
+            else:
+                try:
+                    os.killpg(os.getpgid(int(entry.run_handle_id)), signal.SIGKILL)
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass
             entry.run_status = "failed"
             entry.exit_code = -1
             raise TimeoutError(
-                f"Container {entry.run_handle_id} exceeded timeout of {timeout}s"
+                f"Process {entry.run_handle_id} exceeded timeout of {timeout}s"
             )
         time.sleep(poll_interval)
-        result = runner.poll(entry.run_handle_id)
+        result = _poll_runner(runner, entry.run_handle_id, run_dir)
 
     _finalize_entry(entry, spec, run_dir, result, pre_snapshot, staged_input_paths)
     return entry, result

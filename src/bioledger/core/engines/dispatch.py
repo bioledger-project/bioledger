@@ -4,7 +4,8 @@
 the toolspec's executors and the optional ``engine`` override, then selects
 the appropriate ``ExecutionAdapter``:
 
-- ``docker`` / ``conda`` executors → ``DockerRunnerFacade`` (existing path)
+- ``docker`` executor → ``DockerRunnerFacade`` (existing path)
+- ``conda`` executor → ``CondaRunnerFacade`` (native conda execution)
 - ``nextflow`` / ``snakemake`` / ``galaxy`` executors → engine adapter
   (looked up by engine name; Phase 2 implements Snakemake, Phase 5 adds
   Nextflow and Galaxy)
@@ -20,8 +21,10 @@ import shutil
 from typing import Any
 
 from bioledger.core.engines.config import EngineName, EnginesConfig
+from bioledger.core.engines.conda_facade import CondaRunnerFacade
 from bioledger.core.engines.docker_facade import DockerRunnerFacade
 from bioledger.core.engines.protocol import ExecutionAdapter
+from bioledger.core.engines.validate import format_warnings, validate_engine_config
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +143,14 @@ def dispatch(
     executors = getattr(spec, "executors", ["docker"])
     engine_executors = [e for e in executors if e in ("nextflow", "snakemake", "galaxy")]
 
+    # Validate engine config for container tech mismatches
+    if config is not None and engine_executors:
+        vr = validate_engine_config(config, [spec])
+        if not vr.ok:
+            for w in vr:
+                logger.warning("[%s] %s", w.engine, w.message)
+            logger.debug(format_warnings(vr))
+
     # If an engine is explicitly requested, use it
     if engine is not None:
         if engine not in executors and engine not in engine_executors:
@@ -160,9 +171,11 @@ def dispatch(
             )
         return _get_engine_adapter(engine_executors[0], config)
 
-    # No engine executor — use Docker facade for docker/conda
-    if "docker" in executors or "conda" in executors:
+    # No engine executor — use Docker or Conda facade
+    if "docker" in executors:
         return DockerRunnerFacade()
+    if "conda" in executors:
+        return CondaRunnerFacade()
 
     raise ValueError(
         f"No usable executors in spec.executors={executors} "

@@ -18,10 +18,10 @@ from bioledger.core.engines.protocol import RunHandle, RunStatus, WorkflowHandle
 class DockerRunnerFacade:
     """Adapter wrapping DockerRunner for the ExecutionAdapter protocol.
 
-    This is the adapter for ``executor="docker"`` and ``executor="conda"``
-    (conda resolves to a container image via auto-derive, then runs in Docker).
-    It delegates to the existing DockerRunner, which handles the actual
-    container lifecycle.
+    This is the adapter for ``executor="docker"``. It delegates to the
+    existing DockerRunner, which handles the actual container lifecycle.
+    Native conda execution (``executor="conda"``) is handled by
+    ``CondaRunnerFacade``.
 
     Note: ``submit_spec()`` here is a thin wrapper — the existing executor.py
     functions (``run_tool``, ``submit_tool``, ``poll_tool``) already handle

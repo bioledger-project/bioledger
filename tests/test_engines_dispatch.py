@@ -81,9 +81,10 @@ class TestDispatch:
         assert isinstance(adapter, DockerRunnerFacade)
 
     def test_conda_executor_returns_facade(self):
+        from bioledger.core.engines.conda_facade import CondaRunnerFacade
         spec = _MockSpec(executors=["conda"])
         adapter = dispatch(spec)
-        assert isinstance(adapter, DockerRunnerFacade)
+        assert isinstance(adapter, CondaRunnerFacade)
 
     def test_docker_and_conda_returns_facade(self):
         spec = _MockSpec(executors=["docker", "conda"])
