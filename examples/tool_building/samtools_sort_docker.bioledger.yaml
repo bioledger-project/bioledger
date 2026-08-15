@@ -1,0 +1,36 @@
+spec_version: "0.1"
+revision: "1"
+execution:
+  name: samtools_sort_docker
+  version: "1.17"
+  description: "Sort a BAM file by coordinate (Docker executor)"
+  container: "quay.io/biocontainers/samtools:1.17--h00cdaf9_0"
+  executors:
+    - docker
+  command: >-
+    samtools sort -@ {{parameters.threads}}
+    -o {{outputs._dir}}/sorted.bam
+    {{inputs.input_bam}}
+  inputs:
+    input_bam:
+      type: file
+      format: bam
+      required: true
+      description: "Unsorted BAM file"
+  outputs:
+    sorted:
+      type: file
+      format: bam
+      pattern: "sorted.bam"
+      description: "Coordinate-sorted BAM"
+  parameters:
+    threads:
+      type: integer
+      default: 4
+      min: 1
+      max: 64
+      required: false
+      description: "Number of sorting threads"
+  categories:
+    - alignment
+    - preprocessing

@@ -1,0 +1,30 @@
+spec_version: "0.1"
+revision: "1"
+execution:
+  name: seqtk_galaxy
+  version: "1.3"
+  description: "Convert FASTQ to FASTA via Galaxy engine (planemo)"
+  executors:
+    - galaxy
+  command: >-
+    planemo run {{inputs.tool_xml}} --input {{inputs.reads}} --output {{outputs._dir}}/output.fa
+  inputs:
+    reads:
+      type: file
+      format: fastq
+      required: true
+      description: "Input FASTQ reads"
+    tool_xml:
+      type: file
+      format: xml
+      required: true
+      description: "Galaxy tool XML wrapper for seqtk"
+  outputs:
+    fasta:
+      type: file
+      format: fasta
+      pattern: "output.fa"
+      description: "Output FASTA file"
+  parameters: {}
+  categories:
+    - format-conversion

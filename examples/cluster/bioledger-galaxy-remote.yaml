@@ -1,0 +1,28 @@
+# BioLedger config for remote Galaxy server (cluster or shared instance).
+#
+# Usage: bioledger config validate
+#        bioledger resume <session>  (uses these engine settings)
+#
+# Requires: bioblend installed (pip install bioledger[galaxy]).
+#           A running Galaxy server with an API key.
+#           The Galaxy server handles scheduler submission via its own
+#           job config (Slurm, DRMAA, etc.) — BioLedger just submits
+#           workflows via the API.
+
+engines:
+  default: galaxy
+
+  galaxy:
+    mode: remote
+    url: https://galaxy.example.org
+    # Get your API key from: User → Preferences → Manage API Key
+    # Or set via BIOLEDGER_GALAXY_API_KEY environment variable.
+    api_key: your-api-key-here
+
+  # Not used in this configuration.
+  snakemake:
+    container_runtime: none
+    jobs: 1
+
+  nextflow:
+    pass

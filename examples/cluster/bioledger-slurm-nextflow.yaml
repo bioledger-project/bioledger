@@ -1,0 +1,32 @@
+# BioLedger config for Nextflow on a Slurm cluster with Singularity.
+#
+# Usage: bioledger config validate
+#        bioledger resume <session>  (uses these engine settings)
+#
+# Requires: Nextflow installed and on PATH (or set executable below).
+#           Singularity/Apptainer installed on compute nodes.
+#           Slurm (sbatch) available on the submit host.
+
+engines:
+  default: nextflow
+
+  nextflow:
+    # Point to a nextflow.config that enables Singularity and Slurm.
+    # Example nextflow.config:
+    #   process.executor = 'slurm'
+    #   process.queue = 'normal'
+    #   singularity.enabled = true
+    config_file: /path/to/your/cluster-nextflow.config
+
+    # Or use profiles instead of a config file:
+    # extra_args:
+    #   - "-profile"
+    #   - "slurm,singularity"
+
+  # Snakemake and Galaxy are not used in this configuration.
+  snakemake:
+    container_runtime: singularity
+    jobs: 8
+
+  galaxy:
+    mode: planemo

@@ -1,0 +1,40 @@
+# BioLedger config for Snakemake on a Slurm cluster.
+#
+# Usage: bioledger config validate
+#        bioledger resume <session>  (uses these engine settings)
+#
+# Requires: Snakemake installed (pip install bioledger[snakemake]).
+#           Apptainer/Singularity installed on compute nodes.
+#           Slurm (sbatch) available on the submit host.
+
+engines:
+  default: snakemake
+
+  snakemake:
+    # Container runtime for containerized tools.
+    # apptainer → --use-apptainer (default)
+    # singularity → --use-singularity
+    # conda → --use-conda (for conda_deps specs)
+    # none → run natively (no container isolation)
+    container_runtime: singularity
+
+    # Number of parallel jobs to submit to the cluster.
+    jobs: 8
+
+    # Cluster submission command. Snakemake passes the job script path
+    # as a positional argument after these flags.
+    extra_args:
+      - "--cluster"
+      - "sbatch --partition=normal --time=12:00:00 --cpus-per-task=4"
+
+    # Alternatively, use Snakemake's profile system:
+    # extra_args:
+    #   - "--profile"
+    #   - "slurm"
+
+  nextflow:
+    # Not used in this configuration.
+    pass
+
+  galaxy:
+    mode: planemo
