@@ -79,6 +79,7 @@ ISA-Tab to reproducible package without writing workflow syntax. See the [full w
 ### More examples
 
 - **[Tool discovery](examples/tool_discovery/)** — search the Galaxy Tool Shed and nf-core modules, run discovered tools via their native engines, import BioLedger YAML specs
+- **[Building tool specs](examples/tool_building/)** — author BioLedger tool specs manually for Docker, Conda, Nextflow, and Galaxy executors
 - **[CSV to ISA-Tab](examples/csv_to_isatab/)** — start from a plain samplesheet and convert to structured metadata
 - **[Variant calling on *L. donovani*](examples/variant_calling/)** — use the public library repos to discover tools and data, then run a full pipeline end-to-end
 - **Fan-out scatter** — run a tool across a collection of files using a workflow engine (requires `bioledger[snakemake]` or `bioledger[nextflow]`)

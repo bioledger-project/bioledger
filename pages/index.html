@@ -32,13 +32,18 @@
     </section>
 
     <section id="run-anywhere">
-      <h2>Run anywhere you have Docker or Conda</h2>
-      <p>BioLedger tool specs are <strong>language- and execution-agnostic</strong>: a container image plus a declarative command template, input/output contract, and parameters. Today BioLedger runs tools locally via Docker — you're not tied to a third-party platform or orchestrator to get your analysis done. That means every run is fully observable: BioLedger records the exact command, container, and file hashes, giving you reproducibility and traceability without depending on someone else's infrastructure. <strong>Conda</strong> support is planned as an alternative runtime for environments where Docker isn't available (e.g. shared HPC clusters). Cluster environments using Singularity aren't supported yet.</p>
+      <h2>Run anywhere — Docker, Conda, Nextflow, Snakemake, or Galaxy</h2>
+      <p>BioLedger tool specs are <strong>execution-agnostic</strong>: a declarative command template, input/output contract, and parameters. Today BioLedger runs tools via <strong>Docker</strong>, <strong>Conda</strong> (native conda environments via conda run), <strong>Nextflow</strong>, <strong>Snakemake</strong>, and <strong>Galaxy</strong> (via planemo or remote instances). You're not tied to a single platform — every run is fully observable, with exact commands, containers, and file hashes recorded for reproducibility and traceability.</p>
     </section>
 
     <section id="experiments-not-workflows">
       <h2>Think in experiments, not workflows</h2>
       <p>Researchers don't design a pipeline up front — they load some data, try a tool, look at the output, and decide what's next. BioLedger is built around that reality: every action you take (tool runs, imports, LLM calls, notes) is recorded in an append-only <strong>ledger</strong> as you work. The workflow and RO-Crate aren't something you author — they're <strong>crystallized after the fact</strong> from the ledger, as an artifact that makes what you did reproducible for someone else (including future you).</p>
+    </section>
+
+    <section id="native-engines">
+      <h2>Let workflow engines do what they do best</h2>
+      <p>BioLedger doesn't reinvent workflow orchestration. When you run a tool via Nextflow, Snakemake, or Galaxy, the engine manages its own tool calls, environment, and execution — BioLedger integrates <strong>seamlessly</strong> as a provenance layer on top. Discovered tools from the Galaxy Tool Shed or nf-core run via their native engines without translation. The ledger records what happened; the engine handles how it happened.</p>
     </section>
 
     <section id="llm-where-it-earns-it">
@@ -48,9 +53,8 @@
 
     <section id="roadmap">
       <h2>Roadmap</h2>
-      <p><strong>Near-term:</strong> Galaxy API key support (run tools against a Galaxy instance you already have credentials for), native Nextflow workflow execution, <strong>Conda</strong> as an alternative local runtime to Docker for HPC and shared-cluster environments, and inline output previews (HTML reports, tabular data, BAM/VCF summaries) so you can inspect results without leaving the session.</p>
-      <p><strong>Execution expansion:</strong> We want BioLedger to run on the platforms researchers already use — submitting batch jobs to HPC clusters, supporting Singularity for sites without Docker, and cloud execution. Today it's local Docker only; these are the next frontiers.</p>
-      <p><strong>Longer-term:</strong> have BioLedger generate its own library assets — ingesting Galaxy tools or nf-core modules as BioLedger tool specs, or turning an NCBI BioProject accession into an ISA-Tab study by querying NCBI directly. Until that's automated, these assets are produced by hand and contributed to the library repos or kept locally.</p>
+      <p><strong>Near-term:</strong> Inline output previews (HTML reports, tabular data, BAM/VCF summaries) so you can inspect results without leaving the session, Singularity support for sites without Docker, and LLM-assisted tool spec authoring (describe a tool in plain English and have the agent draft a spec).</p>
+      <p><strong>Longer-term:</strong> Turning an NCBI BioProject accession into an ISA-Tab study by querying NCBI directly, and expanding the public tool and study libraries with community contributions.</p>
     </section>
 
     <section id="documentation">
