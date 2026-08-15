@@ -238,18 +238,76 @@ class GalaxyAdapter:
     ) -> RunHandle:
         """Run a single workflow toolspec via Galaxy.
 
-        Delegates to ``generate()`` + ``submit()``: the ``generate()`` method
-        builds a ``.ga`` workflow from the spec, and ``submit()`` invokes it
-        on the Galaxy instance (planemo or remote).
+        If ``tool_dir`` is provided (discovered Tool Shed XML), delegates to
+        ``generate()`` + ``submit()``: the ``generate()`` method builds a
+        ``.ga`` workflow from the spec, and ``submit()`` invokes it on the
+        Galaxy instance (planemo or remote).
 
-        If ``tool_dir`` is provided (Phase 3A: discovered Tool Shed XML),
-        it is passed to planemo via ``--tool_dir`` so the downloaded tool
-        XML is available in the local Galaxy instance.
+        If ``tool_dir`` is NOT provided (user-defined spec), runs the spec's
+        ``command`` field directly as a subprocess — the command must be a
+        valid Galaxy/planemo invocation (e.g. ``planemo run tool.xml ...``).
+        Bypasses ``.ga`` workflow generation and bioblend entirely.
         """
-        handle = self.generate(spec, input_mapping)
         if tool_dir:
+            handle = self.generate(spec, input_mapping)
             handle.metadata["tool_dir"] = str(tool_dir)
-        return self.submit(handle, input_mapping, params, work_dir)
+            return self.submit(handle, input_mapping, params, work_dir)
+
+        # User-defined spec: run the command directly as a subprocess
+        work_dir = Path(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        from bioledger.toolspec import get_jinja_env
+
+        command_template = spec.command if hasattr(spec, "command") else ""
+        if not command_template:
+            raise RuntimeError(
+                "User-defined Galaxy spec has no command field — cannot "
+                "run directly. Provide a valid Galaxy/planemo invocation "
+                "in the command field, or use a discovered tool with tool_dir."
+            )
+
+        context = {
+            "inputs": {name: f"${{{name}}}" for name in input_mapping},
+            "outputs": {"_dir": str(work_dir)},
+            "parameters": params,
+        }
+        try:
+            rendered_cmd = get_jinja_env().from_string(command_template).render(context)
+        except Exception as e:
+            raise RuntimeError(f"Failed to render Galaxy command: {e}") from e
+
+        log_path = work_dir / "galaxy.log"
+        log_file = open(log_path, "w")
+        try:
+            proc = subprocess.Popen(
+                rendered_cmd,
+                shell=True,
+                cwd=str(work_dir),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log_file.close()
+
+        run_id = str(proc.pid)
+        process_start_time = None
+        try:
+            import psutil
+            process_start_time = psutil.Process(proc.pid).create_time()
+        except Exception:
+            pass
+
+        return RunHandle(
+            executor="galaxy",
+            run_id=run_id,
+            entry_id="",
+            work_dir=work_dir,
+            submitted_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            status="running",
+            process_start_time=process_start_time,
+        )
 
     def generate(
         self,
@@ -299,9 +357,17 @@ class GalaxyAdapter:
         ga_path = work_dir / "workflow.ga"
         ga_path.write_text(handle.artifact_path.read_text())
 
-        # Check tool availability
-        tool_name = handle.step_inventory[0] if handle.step_inventory else "unknown"
-        self._check_tool_availability(tool_name)
+        # Extract tool_id from the .ga workflow JSON for availability check
+        tool_id = "unknown"
+        try:
+            ga_data = json.loads(ga_path.read_text())
+            for step in ga_data.get("steps", {}).values():
+                if step.get("type") == "tool" and step.get("tool_id"):
+                    tool_id = step["tool_id"]
+                    break
+        except Exception:
+            pass
+        self._check_tool_availability(tool_id)
 
         if self._config.mode == "planemo":
             return self._submit_planemo(handle, work_dir, ga_path, input_mapping)
@@ -338,13 +404,16 @@ class GalaxyAdapter:
 
         log_path = work_dir / "galaxy.log"
         log_file = open(log_path, "w")
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(work_dir),
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(work_dir),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log_file.close()
         planemo_pid = proc.pid
 
         # Wait for the Galaxy server to be ready

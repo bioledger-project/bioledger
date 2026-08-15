@@ -69,9 +69,18 @@ class GalaxyEngineConfig(EngineConfig):
 
 
 class SnakemakeEngineConfig(EngineConfig):
-    """Snakemake config. No fields beyond base."""
+    """Snakemake config."""
 
-    pass
+    container_runtime: Literal["apptainer", "singularity", "conda", "none"] = "apptainer"
+    # Which container runtime to use for snakemake's --use-<runtime> flag.
+    # "apptainer" (default) → --use-apptainer
+    # "singularity" → --use-singularity
+    # "conda" → --use-conda
+    # "none" → no flag (run natively)
+
+    jobs: int = 1
+    # Number of jobs to run in parallel. Passed as --jobs to snakemake.
+    # Set to >1 for local parallelism, or combine with extra_args for cluster.
 
 
 class NextflowEngineConfig(EngineConfig):

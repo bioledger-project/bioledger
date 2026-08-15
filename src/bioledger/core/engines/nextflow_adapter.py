@@ -340,13 +340,16 @@ class NextflowAdapter:
         # Launch as subprocess (non-blocking)
         log_path = work_dir / "nextflow.log"
         log_file = open(log_path, "w")
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(work_dir),
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(work_dir),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log_file.close()
 
         run_id = str(proc.pid)
 
@@ -451,13 +454,16 @@ class NextflowAdapter:
         # Launch as subprocess (non-blocking)
         log_path = work_dir / "nextflow.log"
         log_file = open(log_path, "w")
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(work_dir),
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(work_dir),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log_file.close()
 
         run_id = str(proc.pid)
 

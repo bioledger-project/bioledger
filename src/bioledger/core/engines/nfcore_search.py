@@ -128,6 +128,86 @@ def download_module(
     return dest
 
 
+def parse_meta_yml(module_dir: Path) -> dict:
+    """Parse a downloaded nf-core module's meta.yml for input/output metadata.
+
+    Returns a dict with keys:
+    - ``inputs``: list of input names (for channel wiring)
+    - ``outputs``: dict of {name: pattern} (for provenance)
+    - ``container``: container image string (may be empty)
+
+    Unlike ``parse_module_to_spec``, this reads the structured ``meta.yml``
+    file rather than regex-parsing ``main.nf``, making it robust to complex
+    DSL2 patterns (tuple inputs, meta maps, config objects).
+    """
+    import re
+
+    meta_path = module_dir / "meta.yml"
+    if not meta_path.exists():
+        logger.warning("meta.yml not found in %s", module_dir)
+        return {"inputs": [], "outputs": {}, "container": ""}
+
+    content = meta_path.read_text()
+
+    # Simple YAML parsing — no yaml dependency needed for the flat structure
+    # of nf-core meta.yml files.
+    inputs: list[str] = []
+    outputs: dict[str, str] = {}
+    container = ""
+
+    # Parse input names from the 'input' section
+    in_inputs = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("input:"):
+            in_inputs = True
+            continue
+        if in_inputs:
+            # End of input section when we hit a new top-level key
+            _section_keys = ("-", "name:", "description:", "type:", "pattern:")
+            if stripped and not stripped.startswith(_section_keys):
+                in_inputs = False
+            elif stripped.startswith("- name:"):
+                name = stripped.split(":", 1)[1].strip().strip("\"'")
+                if name:
+                    inputs.append(name)
+
+    # Parse output names and patterns from the 'output' section
+    in_outputs = False
+    current_output_name = ""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("output:"):
+            in_outputs = True
+            continue
+        if in_outputs:
+            _section_keys = ("-", "name:", "description:", "type:", "pattern:")
+            if stripped and not stripped.startswith(_section_keys):
+                in_outputs = False
+            elif stripped.startswith("- name:"):
+                current_output_name = stripped.split(":", 1)[1].strip().strip("\"'")
+            elif stripped.startswith("pattern:") and current_output_name:
+                pattern = stripped.split(":", 1)[1].strip().strip("\"'")
+                outputs[current_output_name] = pattern
+                current_output_name = ""
+
+    # Try to extract container from main.nf (meta.yml doesn't have it)
+    nf_path = module_dir / "main.nf"
+    if nf_path.exists():
+        nf_content = nf_path.read_text()
+        container_match = re.search(
+            r"container\s+['\"]([^'\"]+)['\"]", nf_content,
+        )
+        if container_match:
+            container = container_match.group(1)
+
+    return {
+        "inputs": inputs,
+        "outputs": outputs,
+        "container": container,
+    }
+
+
 def parse_module_to_spec(module_dir: Path) -> ExecutionSpec:
     """Parse a downloaded nf-core module main.nf into a minimal ExecutionSpec.
 

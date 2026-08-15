@@ -305,21 +305,27 @@ class SnakemakeAdapter:
             "-s", str(snakefile_path),
             "--configfile", str(config_path),
             "--stats", str(work_dir / "stats.json"),
-            "--use-apptainer" if container_image else "",
+            "--jobs", str(self._config.jobs),
         ]
+        # Container runtime flag
+        if container_image and self._config.container_runtime != "none":
+            cmd.append(f"--use-{self._config.container_runtime}")
         cmd = [c for c in cmd if c]
         cmd.extend(self._config.extra_args)
 
         # Launch as subprocess (non-blocking)
         log_path = work_dir / "snakemake.log"
         log_file = open(log_path, "w")
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(work_dir),
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(work_dir),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log_file.close()
 
         run_id = str(proc.pid)
 
@@ -413,8 +419,11 @@ class SnakemakeAdapter:
             "-s", str(snakefile_path),
             "--configfile", str(config_path),
             "--stats", str(work_dir / "stats.json"),
-            "--use-apptainer" if handle.container_image else "",
+            "--jobs", str(self._config.jobs),
         ]
+        # Container runtime flag
+        if handle.container_image and self._config.container_runtime != "none":
+            cmd.append(f"--use-{self._config.container_runtime}")
         # Filter empty strings and add extra_args
         cmd = [c for c in cmd if c]
         extra_args = handle.metadata.get("extra_args", [])
@@ -424,13 +433,16 @@ class SnakemakeAdapter:
         # Launch as subprocess (non-blocking)
         log_path = work_dir / "snakemake.log"
         log_file = open(log_path, "w")
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(work_dir),
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(work_dir),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log_file.close()
 
         run_id = str(proc.pid)
 

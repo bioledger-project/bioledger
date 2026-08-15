@@ -38,6 +38,165 @@ from bioledger.toolspec.models import ExecutionMode
 from bioledger.toolspec.store import ToolStore
 
 
+def _write_engine_metadata_sidecar(
+    session_dir: Path,
+    entry_id: str,
+    run_handle: Any,
+    module_dir: Path | None = None,
+    tool_dir: Path | None = None,
+) -> None:
+    """Write _engine_metadata_{entry_id}.json sidecar at a predictable location.
+
+    Stores all adapter-specific metadata needed for poll/collect/crystallize:
+    - work_dir, run_id, executor, submitted_at, status
+    - process_start_time (Snakemake/Nextflow)
+    - planemo_pid (Galaxy, from run_handle.metadata)
+    - module_dir (Nextflow discovered)
+    - tool_dir (Galaxy discovered)
+    """
+    import json
+
+    meta: dict[str, Any] = {
+        "work_dir": str(run_handle.work_dir),
+        "run_id": run_handle.run_id,
+        "executor": run_handle.executor,
+        "submitted_at": str(run_handle.submitted_at),
+        "status": run_handle.status,
+    }
+    if run_handle.process_start_time is not None:
+        meta["process_start_time"] = run_handle.process_start_time
+    if run_handle.metadata:
+        if "planemo_pid" in run_handle.metadata:
+            meta["planemo_pid"] = run_handle.metadata["planemo_pid"]
+    if module_dir:
+        meta["module_dir"] = str(module_dir)
+    if tool_dir:
+        meta["tool_dir"] = str(tool_dir)
+
+    sidecar_path = session_dir / f"_engine_metadata_{entry_id}.json"
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text(json.dumps(meta, indent=2))
+
+
+def _read_engine_metadata_sidecar(
+    session_dir: Path, entry_id: str,
+) -> dict[str, Any] | None:
+    """Read the _engine_metadata sidecar, or None if it doesn't exist."""
+    import json
+
+    sidecar_path = session_dir / f"_engine_metadata_{entry_id}.json"
+    if not sidecar_path.exists():
+        return None
+    try:
+        return json.loads(sidecar_path.read_text())
+    except Exception:
+        return None
+
+
+def _finalize_engine_entry(
+    entry: LedgerEntry,
+    run_handle: Any,
+    work_dir: Path,
+    adapter: Any,
+    status: Any,
+) -> LedgerEntry:
+    """Finalize an engine entry after it reaches a terminal state.
+
+    Calls adapter.collect() for engine-specific cleanup, discovers outputs
+    from the work directory, creates FileRef objects, and persists status.
+    """
+    import hashlib as _hashlib
+
+    from bioledger.forges.analysisforge.executor import _discover_outputs
+    from bioledger.toolspec.models import ExecutionSpec, ToolSpec
+
+    # 1. Call collect() for engine-specific cleanup/output download
+    collected: list[dict] = []
+    try:
+        collected = adapter.collect(run_handle) or []
+    except Exception as e:
+        logging.warning("adapter.collect() failed for %s: %s", entry.id, e)
+
+    # 2. Output discovery from work directory
+    spec_snapshot = entry.tool_spec_snapshot or {}
+    try:
+        spec = ToolSpec(execution=ExecutionSpec(**spec_snapshot))
+    except Exception:
+        logging.warning(
+            "Cannot reconstruct ToolSpec for entry %s, skipping output discovery",
+            entry.id,
+        )
+        entry.run_status = status.state
+        entry.exit_code = 0 if status.state == "completed" else 1
+        if status.message:
+            entry.notes = (
+                (entry.notes + "\n" if entry.notes else "")
+                + status.message
+            )
+        return entry
+
+    input_mapping = entry.container.input_mapping if entry.container else {}
+    staged_input_paths = {
+        str((work_dir / name).resolve()) for name in input_mapping.values()
+    }
+
+    # Exclude known metadata files from output discovery
+    exclude_paths: set[str] = set()
+    for meta_file in (
+        "_engine_metadata.json",
+        "_pre_snapshot.json",
+        "_process_start_time.json",
+    ):
+        meta_path = work_dir / meta_file
+        if meta_path.exists():
+            exclude_paths.add(str(meta_path.resolve()))
+    # Also exclude the session-level sidecar
+    sidecar_exclude = work_dir.parent / f"_engine_metadata_{entry.id}.json"
+    if sidecar_exclude.exists():
+        exclude_paths.add(str(sidecar_exclude.resolve()))
+
+    output_paths = _discover_outputs(
+        spec, work_dir, {}, staged_input_paths, exclude_paths=exclude_paths,
+    )
+
+    # Also include paths from collect() that aren't already discovered
+    discovered_set = {str(p.resolve()) for p in output_paths}
+    for item in collected:
+        col_path = Path(item.get("path", ""))
+        if col_path.exists() and str(col_path.resolve()) not in discovered_set:
+            output_paths.append(col_path)
+
+    # 3. Create FileRef objects for discovered outputs
+    for out_path in output_paths:
+        try:
+            sha256 = _hashlib.sha256(out_path.read_bytes()).hexdigest()
+            entry.files.append(
+                FileRef(
+                    path=str(out_path),
+                    sha256=sha256,
+                    size_bytes=out_path.stat().st_size,
+                    role="output",
+                )
+            )
+        except Exception as e:
+            logging.warning("Failed to create FileRef for %s: %s", out_path, e)
+
+    # 4. Persist status
+    entry.run_status = status.state
+    entry.exit_code = 0 if status.state == "completed" else 1
+    if status.message:
+        entry.notes = (
+            (entry.notes + "\n" if entry.notes else "") + status.message
+        )
+    if status.state == "unknown":
+        entry.notes = (
+            (entry.notes + "\n" if entry.notes else "")
+            + "Warning: engine status was uncertain (process gone)"
+        )
+
+    return entry
+
+
 class KeyValuePair(BaseModel):
     """A single key-value pair (used in place of dict for LLM compatibility)."""
 
@@ -660,23 +819,31 @@ class AnalysisForgeAgent:
                 # Engine adapter path — use adapter.poll()
                 try:
                     adapter = _get_engine_adapter(executor, self.config.engines)
+
+                    # Reconstruct RunHandle from sidecar metadata
+                    meta = _read_engine_metadata_sidecar(
+                        session_dir, entry.id,
+                    )
                     rh = RunHandle(
                         executor=executor,
                         run_id=entry.run_handle_id or "",
                         entry_id=entry.id,
-                        work_dir=session_dir,
+                        work_dir=Path(meta["work_dir"]) if meta else session_dir,
+                        metadata=(
+                            {"planemo_pid": meta["planemo_pid"]}
+                            if meta and "planemo_pid" in meta else {}
+                        ),
+                        process_start_time=(
+                            meta.get("process_start_time") if meta else None
+                        ),
                     )
                     status = adapter.poll(rh)
                     if status is not None and status.state in (
                         "completed", "failed", "unknown"
                     ):
-                        entry.run_status = status.state
-                        entry.exit_code = 0 if status.state == "completed" else 1
-                        if status.message:
-                            entry.notes = (
-                                (entry.notes + "\n" if entry.notes else "")
-                                + status.message
-                            )
+                        _finalize_engine_entry(
+                            entry, rh, rh.work_dir, adapter, status,
+                        )
                 except (NotImplementedError, RuntimeError) as e:
                     logging.warning(
                         "Cannot poll entry %s with executor %s: %s",
@@ -859,6 +1026,11 @@ class AnalysisForgeAgent:
             work_dir=session_dir / f"fanout_{entry.id}",
         )
 
+        # Write engine metadata sidecar for poll/collect reconstruction
+        _write_engine_metadata_sidecar(
+            session_dir, entry.id, run_handle,
+        )
+
         # Update entry with run handle
         entry.run_handle_id = run_handle.run_id
         self.store.save_session(self.session)
@@ -906,12 +1078,42 @@ class AnalysisForgeAgent:
             subdir = discovered_source[len("nfcore:"):]
             from bioledger.core.engines.nfcore_search import (
                 download_module,
-                parse_module_to_spec,
+                parse_meta_yml,
             )
 
             work_dir = session_dir / f"discovered_nfcore_{subdir.replace('/', '_')}"
             module_dir = download_module(subdir, dest_dir=work_dir / "module")
-            spec = parse_module_to_spec(module_dir)
+            meta = parse_meta_yml(module_dir)
+            # Build a minimal ExecutionSpec from meta.yml data
+            from bioledger.toolspec.models import (
+                ExecutionSpec,
+                ParamType,
+                ToolInput,
+                ToolOutput,
+            )
+            tool_name = subdir.replace("/", "_")
+            inputs = {
+                name: ToolInput(name=name, type=ParamType.FILE, format="any")
+                for name in meta["inputs"]
+            }
+            outputs = {
+                name: ToolOutput(
+                    name=name, type=ParamType.FILE,
+                    format="any", pattern=pattern,
+                )
+                for name, pattern in meta["outputs"].items()
+            }
+            first_input = meta["inputs"][0] if meta["inputs"] else "input"
+            spec = ExecutionSpec(
+                name=tool_name,
+                version="",
+                description="",
+                container=meta["container"],
+                command=f"nextflow run {{{{inputs.{first_input}}}}}",
+                inputs=inputs,
+                outputs=outputs,
+                executors=["nextflow"],
+            )
             engine = "nextflow"
         else:
             raise ValueError(
@@ -954,6 +1156,13 @@ class AnalysisForgeAgent:
         elif engine == "nextflow":
             submit_kwargs["module_dir"] = module_dir
         run_handle = adapter.submit_spec(**submit_kwargs)
+
+        # Write engine metadata sidecar for poll/collect reconstruction
+        _write_engine_metadata_sidecar(
+            session_dir, entry.id, run_handle,
+            module_dir=module_dir if engine == "nextflow" else None,
+            tool_dir=tool_dir if engine == "galaxy" else None,
+        )
 
         entry.run_handle_id = run_handle.run_id
         self.store.save_session(self.session)

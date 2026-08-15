@@ -318,7 +318,7 @@ class TestGalaxyDispatch:
 
 class TestGalaxySubmitSpec:
     def test_submit_spec_delegates_to_generate_and_submit(self, tmp_path):
-        """submit_spec() should call generate() then submit()."""
+        """submit_spec() with tool_dir should call generate() then submit()."""
         adapter = GalaxyAdapter()
         spec = _MockSpec()
         mock_handle = MagicMock()
@@ -337,6 +337,7 @@ class TestGalaxySubmitSpec:
                 input_mapping={"input": "/data/file.bam"},
                 params={"threads": "4"},
                 work_dir=tmp_path,
+                tool_dir=tmp_path / "tool",
             )
         mock_gen.assert_called_once_with(spec, {"input": "/data/file.bam"})
         mock_sub.assert_called_once_with(
