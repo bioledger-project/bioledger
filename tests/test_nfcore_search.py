@@ -9,7 +9,7 @@ import pytest
 from bioledger.core.engines.nfcore_search import (
     NFCoreResult,
     download_module,
-    parse_module_to_spec,
+    parse_meta_yml,
     search_nfcore,
 )
 
@@ -71,62 +71,3 @@ class TestDownloadModule:
         assert dest.exists()
         assert (dest / "main.nf").exists()
         assert (dest / "meta.yml").exists()
-
-
-class TestParseModuleToSpec:
-    def test_parse_valid_module(self, tmp_path):
-        """parse_module_to_spec() should extract process name, container, inputs, outputs."""
-        nf_content = (
-            "process BOWTIE2_ALIGN {\n"
-            "    container 'quay.io/biocontainers/bowtie2:2.5.0'\n"
-            "\n"
-            "    input:\n"
-            "    path reads\n"
-            "    path index\n"
-            "\n"
-            "    output:\n"
-            '    path "*.bam", emit: bam\n'
-            '    path "*.log", emit: log\n'
-            "\n"
-            "    script:\n"
-            '    """\n'
-            "    bowtie2 -x ${index} -U ${reads} -S output.bam\n"
-            '    """\n'
-            "}\n"
-        )
-        (tmp_path / "main.nf").write_text(nf_content)
-
-        spec = parse_module_to_spec(tmp_path)
-        assert spec.name == "BOWTIE2_ALIGN"
-        assert spec.container == "quay.io/biocontainers/bowtie2:2.5.0"
-        assert "reads" in spec.inputs
-        assert "index" in spec.inputs
-        assert "bam" in spec.outputs
-        assert "log" in spec.outputs
-        assert spec.outputs["bam"].pattern == "*.bam"
-        assert "nextflow" in spec.executors
-
-    def test_parse_no_main_nf_raises(self, tmp_path):
-        """parse_module_to_spec() should raise FileNotFoundError if no main.nf."""
-        with pytest.raises(FileNotFoundError):
-            parse_module_to_spec(tmp_path)
-
-    def test_parse_minimal_module(self, tmp_path):
-        """parse_module_to_spec() should handle a minimal process."""
-        nf_content = (
-            "process SIMPLE {\n"
-            "    input:\n"
-            "    path input_file\n"
-            "\n"
-            "    script:\n"
-            '    """\n'
-            "    echo hello\n"
-            '    """\n'
-            "}\n"
-        )
-        (tmp_path / "main.nf").write_text(nf_content)
-
-        spec = parse_module_to_spec(tmp_path)
-        assert spec.name == "SIMPLE"
-        assert "input_file" in spec.inputs
-        assert spec.outputs == {}

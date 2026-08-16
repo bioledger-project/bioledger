@@ -29,14 +29,14 @@ class TestValidateEngineConfig:
         result = validate_engine_config(config)
         assert result.ok
 
-    def test_snakemake_none_runtime_warns(self):
+    def test_snakemake_none_runtime_no_specs_ok(self):
+        """container_runtime='none' with no specs should NOT warn (unconditional check removed)."""
         config = EnginesConfig(
             snakemake=SnakemakeEngineConfig(container_runtime="none"),
         )
         result = validate_engine_config(config)
-        assert not result.ok
         smk_warnings = [w for w in result if w.engine == "snakemake"]
-        assert any("container_runtime is 'none'" in w.message for w in smk_warnings)
+        assert len(smk_warnings) == 0
 
     def test_snakemake_cluster_with_jobs_one_warns(self):
         config = EnginesConfig(
@@ -223,10 +223,10 @@ class TestFormatWarnings:
 
     def test_with_warnings(self):
         config = EnginesConfig(
-            snakemake=SnakemakeEngineConfig(container_runtime="none"),
+            galaxy=GalaxyEngineConfig(mode="planemo"),
         )
         result = validate_engine_config(config)
         text = format_warnings(result)
         assert "warning" in text.lower()
-        assert "snakemake" in text
-        assert "container_runtime" in text
+        assert "galaxy" in text
+        assert "planemo" in text

@@ -32,9 +32,5 @@ engines:
     #   - "--profile"
     #   - "slurm"
 
-  nextflow:
-    # Not used in this configuration.
-    pass
-
-  galaxy:
-    mode: planemo
+  # nextflow and galaxy sections omitted — not used in this configuration.
+  # Add them if you need to run tools via those engines in the same session.

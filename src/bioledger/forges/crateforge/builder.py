@@ -50,10 +50,15 @@ def _generate_nextflow_config(entries: list[LedgerEntry]) -> str:
         lines.append("    //     docker.enabled = true")
         lines.append("    // }")
 
-    # Singularity profile (always available as alternative)
-    lines.append("    singularity {")
-    lines.append("        singularity.enabled = true")
-    lines.append("    }")
+    # Singularity profile (commented out — uncomment for HPC/Singularity)
+    if not has_docker and not has_conda:
+        lines.append("    singularity {")
+        lines.append("        singularity.enabled = true")
+        lines.append("    }")
+    else:
+        lines.append("    // singularity {")
+        lines.append("    //     singularity.enabled = true")
+        lines.append("    // }")
 
     # Conda profile
     if has_conda:
@@ -75,6 +80,18 @@ def _generate_nextflow_config(entries: list[LedgerEntry]) -> str:
     lines.append("    // }")
 
     lines.append("}")
+
+    # manifest block: pin nextflow version if any entry used nextflow natively
+    nf_entries = [e for e in entries if e.executor == "nextflow" and e.executor_version]
+    if nf_entries:
+        # Extract semver from the recorded version string (e.g. "nextflow 23.10.0")
+        from bioledger.core.engines.versions import _extract_version
+        nf_ver = _extract_version("nextflow", nf_entries[0].executor_version)
+        lines.append("")
+        lines.append("manifest {")
+        lines.append(f"    nextflowVersion = '>={nf_ver}'")
+        lines.append("}")
+
     return "\n".join(lines) + "\n"
 
 
@@ -140,14 +157,41 @@ def _add_engine_supplementary_files(
                         "programmingLanguage": "snakemake",
                     },
                 )
-        elif entry.executor in ("galaxy", "nextflow") and session_dir:
+        elif entry.executor in ("galaxy", "nextflow"):
+            if not session_dir:
+                logger.warning(
+                    "Cannot add supplementary files for entry %s — "
+                    "session_dir not provided",
+                    entry.id,
+                )
+                continue
             meta_path = session_dir / f"_engine_metadata_{entry.id}.json"
             if meta_path.exists():
                 meta = json.loads(meta_path.read_text())
                 dir_key = "tool_dir" if entry.executor == "galaxy" else "module_dir"
                 src_dir = meta.get(dir_key)
                 if src_dir and Path(src_dir).exists():
-                    glob_pattern = "*.xml" if entry.executor == "galaxy" else "*"
+                    if entry.executor == "galaxy":
+                        glob_pattern = "*.xml"
+                    else:
+                        relevant_exts = (".nf", ".yml", ".yaml", ".md", ".conf")
+                        for f in Path(src_dir).iterdir():
+                            if not f.is_file() or f.suffix not in relevant_exts:
+                                continue
+                            dest = f"{entry.tool_spec_name}/{f.name}"
+                            f_path = scratch / dest
+                            f_path.parent.mkdir(parents=True, exist_ok=True)
+                            f_path.write_bytes(f.read_bytes())
+                            crate.add_file(
+                                str(f_path),
+                                dest_path=dest,
+                                properties={
+                                    "description": (
+                                        f"Nextflow module for {entry.tool_spec_name}"
+                                    ),
+                                },
+                            )
+                        continue
                     for f in Path(src_dir).glob(glob_pattern):
                         if not f.is_file():
                             continue

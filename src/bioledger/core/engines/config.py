@@ -53,6 +53,10 @@ class GalaxyEngineConfig(EngineConfig):
     # Non-empty string → real API key.
     # Also settable via BIOLEDGER_GALAXY_API_KEY env var (takes precedence).
 
+    planemo_port: int = 8765
+    # Port for planemo serve in planemo mode. Change to avoid conflicts
+    # when running multiple planemo instances concurrently.
+
     @model_validator(mode="after")
     def _validate_remote_mode(self) -> "GalaxyEngineConfig":
         if self.mode == "remote":

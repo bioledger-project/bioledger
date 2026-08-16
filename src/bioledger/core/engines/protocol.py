@@ -110,11 +110,11 @@ class ExecutionAdapter(Protocol):
       Docker runs. ``submit_spec()``/``poll()``/``collect()`` are functional;
       ``generate()``/``submit()`` raise NotImplementedError (Docker can't fan-out).
     - ``CondaRunnerFacade``: wraps CondaRunner for native conda single-tool
-      runs. Same surface as DockerRunnerFacade — ``poll()``/``collect()``
-      functional, ``submit_spec()``/``generate()``/``submit()`` raise.
-    - ``SnakemakeAdapter`` (Phase 2): full implementation.
-    - ``NextflowAdapter`` (Phase 5): full implementation.
-    - ``GalaxyAdapter`` (Phase 5): full implementation.
+      runs. Same surface as DockerRunnerFacade — ``submit_spec()``/
+      ``poll()``/``collect()`` functional, ``generate()``/``submit()`` raise.
+    - ``SnakemakeAdapter``: full implementation.
+    - ``NextflowAdapter``: full implementation.
+    - ``GalaxyAdapter``: full implementation.
     """
 
     def submit_spec(

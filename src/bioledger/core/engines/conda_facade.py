@@ -1,10 +1,8 @@
 """CondaRunner facade implementing the ExecutionAdapter protocol.
 
 Wraps ``CondaRunner`` so native conda single-tool runs can go through
-``dispatch()``. Only ``poll()`` is functional — ``submit_spec()`` raises
-``NotImplementedError`` because the actual submission still lives in
-``executor.py`` (same pattern as ``DockerRunnerFacade``). ``generate()``
-and ``submit()`` raise because conda cannot fan-out.
+``dispatch()``. Implements ``submit_spec()`` and ``poll()`` —
+``generate()`` and ``submit()`` raise because conda cannot fan-out.
 """
 
 from __future__ import annotations
@@ -24,12 +22,11 @@ class CondaRunnerFacade:
     It delegates to ``CondaRunner``, which handles conda env creation,
     process launch, and polling.
 
-    Note: ``submit_spec()`` here is a thin stub — the existing executor.py
-    functions (``run_tool``, ``submit_tool``, ``poll_tool``) already handle
-    staging, command rendering, and entry creation. This facade exists so
-    ``dispatch()`` has a uniform interface; the heavy lifting stays in
-    executor.py for now. Phase 2b will fold ``check_job_status`` /
-    ``poll_pending_jobs`` to call ``adapter.poll()`` uniformly.
+    ``submit_spec()`` delegates to ``executor.stage_and_submit()`` so that
+    ``dispatch()`` → ``adapter.submit_spec()`` works uniformly for conda
+    runs. The created ``LedgerEntry`` is carried in
+    ``RunHandle.metadata["ledger_entry"]`` so the caller can attach it to
+    the session.
     """
 
     def __init__(self, runner: CondaRunner | None = None) -> None:
@@ -48,10 +45,33 @@ class CondaRunnerFacade:
         params: dict[str, Any],
         work_dir: Path,
     ) -> RunHandle:
-        raise NotImplementedError(
-            "CondaRunnerFacade.submit_spec is not yet wired — "
-            "Conda runs still go through executor.py directly. "
-            "This will be connected in Phase 2b when dispatch() is unified."
+        """Submit a single tool run via native conda.
+
+        Delegates to ``executor.stage_and_submit()`` for staging, command
+        rendering, conda env creation/launch, and ``LedgerEntry`` creation.
+        The created entry is carried in ``RunHandle.metadata["ledger_entry"]``
+        so the caller can attach it to the session.
+        """
+        from bioledger.forges.analysisforge.executor import (
+            _spec_to_toolspec,
+            stage_and_submit,
+        )
+
+        toolspec = _spec_to_toolspec(spec)
+        input_files = {k: Path(v) for k, v in input_mapping.items()}
+        # work_dir is the per-run dir; session_dir is its parent's parent
+        # (sessions/<id>/runs/<run_id> → sessions/<id>)
+        session_dir = work_dir.parent.parent
+        entry, run_dir, _, _, _ = stage_and_submit(
+            toolspec, input_files, session_dir, work_dir, params, None
+        )
+        return RunHandle(
+            executor="conda",
+            run_id=entry.run_handle_id or "",
+            entry_id=entry.id,
+            work_dir=run_dir,
+            status="running",
+            metadata={"ledger_entry": entry},
         )
 
     def generate(

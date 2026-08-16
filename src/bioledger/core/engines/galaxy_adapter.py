@@ -153,6 +153,8 @@ class GalaxyAdapter:
     raises an error with a clear message — no Docker fallback.
     """
 
+    _engine_name = "galaxy"
+
     def __init__(self, config: GalaxyEngineConfig | None = None) -> None:
         self._config = config or GalaxyEngineConfig()
         self._bioblend_client = None
@@ -167,6 +169,19 @@ class GalaxyAdapter:
             "Remote Galaxy mode requires bioblend. "
             "Install with: pip install bioledger[galaxy]"
         )
+
+    def _detect_version(self) -> str:
+        """Detect the planemo/galaxy version by shelling out once; cache on the instance."""
+        if hasattr(self, "_cached_version"):
+            return self._cached_version
+        from bioledger.core.engines.versions import detect_engine_version
+        try:
+            exe = self.executable
+        except RuntimeError:
+            self._cached_version = "galaxy unknown"
+            return self._cached_version
+        self._cached_version = detect_engine_version(self._engine_name, exe)
+        return self._cached_version
 
     def _get_bioblend_client(self):
         """Get or create a bioblend GalaxyClient for remote mode."""
@@ -188,7 +203,7 @@ class GalaxyAdapter:
     def _get_galaxy_instance(self):
         """Get a bioblend GalaxyInstance for either planemo or remote mode.
 
-        In planemo mode, connects to the local planemo server at localhost:8765.
+        In planemo mode, connects to the local planemo server at the configured port.
         In remote mode, connects to the configured Galaxy server.
         """
         if self._config.mode == "planemo":
@@ -199,7 +214,7 @@ class GalaxyAdapter:
                     "bioblend is not installed. "
                     "Install with: pip install bioledger[galaxy]"
                 )
-            return GalaxyInstance(url="http://localhost:8765", key="")
+            return GalaxyInstance(url=f"http://localhost:{self._config.planemo_port}", key="")
         else:
             return self._get_bioblend_client()
 
@@ -280,9 +295,9 @@ class GalaxyAdapter:
         log_path = work_dir / "galaxy.log"
         log_file = open(log_path, "w")
         try:
+            import shlex
             proc = subprocess.Popen(
-                rendered_cmd,
-                shell=True,
+                shlex.split(rendered_cmd),
                 cwd=str(work_dir),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -304,9 +319,9 @@ class GalaxyAdapter:
             run_id=run_id,
             entry_id="",
             work_dir=work_dir,
-            submitted_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             status="running",
             process_start_time=process_start_time,
+            metadata={"engine_version": self._detect_version()},
         )
 
     def generate(
@@ -315,9 +330,18 @@ class GalaxyAdapter:
         input_mapping: dict[str, str],
         extra_args: list[str] | None = None,
     ) -> WorkflowHandle:
-        """Generate a Galaxy .ga workflow definition for fan-out."""
-        import tempfile
-        artifact_path = Path(tempfile.gettempdir()) / f"bioledger_galaxy_{int(time.time())}.ga"
+        """Generate a Galaxy .ga workflow definition for fan-out.
+
+        Galaxy fan-out is not yet supported — this method raises
+        ``NotImplementedError`` with install instructions for Snakemake or
+        Nextflow. Galaxy is still supported for single-tool runs and Tool
+        Shed discovery via ``submit_spec()``.
+        """
+        raise NotImplementedError(
+            "Galaxy fan-out is not yet supported. Fan-out requires Snakemake or Nextflow. "
+            "Install one with: pip install bioledger[snakemake] or pip install bioledger[nextflow]. "
+            "Galaxy is supported for single-tool runs and Tool Shed discovery."
+        )
 
         step_names, collection_inputs = _generate_galaxy_workflow(
             spec, input_mapping, artifact_path
@@ -391,7 +415,7 @@ class GalaxyAdapter:
             "galaxy",
             "--galaxy-root",
             str(work_dir / "galaxy"),
-            "--port", "8765",
+            "--port", str(self._config.planemo_port),
         ]
         # Support --tool_dir for discovered tools (Phase 3A)
         tool_dir = handle.metadata.get("tool_dir")
@@ -419,7 +443,7 @@ class GalaxyAdapter:
         # Wait for the Galaxy server to be ready
         import httpx
 
-        server_url = "http://localhost:8765/api/version"
+        server_url = f"http://localhost:{self._config.planemo_port}/api/version"
         for _ in range(30):
             try:
                 resp = httpx.get(server_url, timeout=2.0)
@@ -475,11 +499,8 @@ class GalaxyAdapter:
             run_id=invocation_id,
             entry_id="",
             work_dir=work_dir,
-            submitted_at=time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-            ),
             status="running",
-            metadata={"planemo_pid": planemo_pid},
+            metadata={"planemo_pid": planemo_pid, "engine_version": self._detect_version()},
         )
 
     def _submit_remote(
@@ -528,10 +549,8 @@ class GalaxyAdapter:
             run_id=invocation_id,
             entry_id="",
             work_dir=work_dir,
-            submitted_at=time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-            ),
             status="running",
+            metadata={"engine_version": self._detect_version()},
         )
 
     def poll(self, run_handle: RunHandle) -> RunStatus | None:

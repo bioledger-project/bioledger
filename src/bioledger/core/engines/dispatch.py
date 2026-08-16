@@ -4,11 +4,10 @@
 the toolspec's executors and the optional ``engine`` override, then selects
 the appropriate ``ExecutionAdapter``:
 
-- ``docker`` executor → ``DockerRunnerFacade`` (existing path)
+- ``docker`` executor → ``DockerRunnerFacade`` (delegates to executor.py staging)
 - ``conda`` executor → ``CondaRunnerFacade`` (native conda execution)
 - ``nextflow`` / ``snakemake`` / ``galaxy`` executors → engine adapter
-  (looked up by engine name; Phase 2 implements Snakemake, Phase 5 adds
-  Nextflow and Galaxy)
+  (looked up by engine name; all three are implemented)
 
 If no engine is specified for a fan-out request, auto-detect runs (config
 default → scan for installed engines → error with install options).
@@ -29,7 +28,6 @@ from bioledger.core.engines.validate import format_warnings, validate_engine_con
 logger = logging.getLogger(__name__)
 
 # Registry of engine adapter factories, keyed by engine name.
-# Populated as adapters are implemented (Phase 2: snakemake, Phase 5: nextflow/galaxy).
 _adapter_registry: dict[str, type] = {}
 
 
@@ -200,20 +198,27 @@ def resolve_engine_for_fanout(
 
     Raises:
         RuntimeError: If no engine is available, with install instructions.
+        NotImplementedError: If Galaxy is selected for fan-out (not yet supported).
     """
     if engine is not None:
-        return engine
+        resolved = engine
+    elif config is not None and config.default != "auto":
+        resolved = config.default
+    else:
+        # Auto-detect
+        detected = _detect_installed_engine()
+        if detected is None:
+            raise RuntimeError(
+                "Fan-out requires a workflow engine, but none were detected. "
+                "Install one with: pip install bioledger[snakemake] "
+                "or pip install bioledger[nextflow]"
+            )
+        resolved = detected
 
-    # Check config default
-    if config is not None and config.default != "auto":
-        return config.default
-
-    # Auto-detect
-    detected = _detect_installed_engine()
-    if detected is None:
-        raise RuntimeError(
-            "Fan-out requires a workflow engine, but none were detected. "
-            "Install one with: pip install bioledger[snakemake] "
-            "or pip install bioledger[galaxy]"
+    if resolved == "galaxy":
+        raise NotImplementedError(
+            "Galaxy fan-out is not yet supported. Fan-out requires Snakemake or Nextflow. "
+            "Install one with: pip install bioledger[snakemake] or pip install bioledger[nextflow]. "
+            "Galaxy is supported for single-tool runs and Tool Shed discovery."
         )
-    return detected
+    return resolved

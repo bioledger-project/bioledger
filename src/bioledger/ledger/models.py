@@ -92,6 +92,10 @@ class LedgerEntry(BaseModel):
     # (the existing path), "conda" for conda-based runs, or an engine name
     # ("nextflow"/"snakemake"/"galaxy") for workflow-engine submissions.
     executor: str = "docker"
+    executor_version: str = ""
+    # Version of the engine that ran this entry (e.g. "snakemake 7.32.4"),
+    # captured at submit time. Empty for docker/conda entries and legacy
+    # entries created before this field existed.
 
 
 class LedgerSession(BaseModel):

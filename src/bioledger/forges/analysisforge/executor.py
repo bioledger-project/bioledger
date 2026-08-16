@@ -395,27 +395,37 @@ def _finalize_entry(
     return entry
 
 
-def _submit_and_stage(
-    session: LedgerSession,
+def _spec_to_toolspec(spec: ToolSpec | ExecutionSpec) -> ToolSpec:
+    """Ensure a spec is a ToolSpec, wrapping an ExecutionSpec if needed.
+
+    The dispatch/adapter path receives ExecutionSpec objects, but the
+    staging logic operates on ToolSpec. This helper bridges the two.
+    """
+    if isinstance(spec, ToolSpec):
+        return spec
+    return ToolSpec(execution=spec)
+
+
+def stage_and_submit(
     spec: ToolSpec,
     input_files: dict[str, Path],
     session_dir: Path,
+    run_dir: Path,
     params: dict | None,
     parent_id: str | None,
 ) -> tuple[LedgerEntry, Path, dict[str, float], set[str], DockerRunner | CondaRunner]:
-    """Shared setup for submit_tool()/run_tool(): stage inputs, snapshot the
-    run dir BEFORE starting the container (so fast-finishing tools don't
-    race the pre-snapshot), then start the container.
+    """Stage inputs, snapshot, and launch the container/conda process.
 
-    Returns (entry, run_dir, pre_snapshot, staged_input_paths, runner) —
-    the latter two are needed by run_tool()'s caller to finalize the entry
-    once the container completes; submit_tool() discards them since
-    poll_tool() reconstructs an equivalent snapshot later from disk.
+    Does everything ``_submit_and_stage`` does **except** ``session.add(entry)``
+    — it creates the ``LedgerEntry`` and returns it, leaving session attachment
+    to the caller. This allows the Docker/Conda facades to call it without
+    having a ``LedgerSession`` in scope.
+
+    Returns (entry, run_dir, pre_snapshot, staged_input_paths, runner).
     """
     kind = _resolve_runner_kind(spec)
 
-    run_id = uuid.uuid4().hex[:20]
-    run_dir = session_dir / "runs" / run_id
+    run_id = run_dir.name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Stage inputs (symlink for in-session sources, copy for external)
@@ -471,7 +481,6 @@ def _submit_and_stage(
             run_handle_id=pid_str,
             executor="conda",
         )
-        session.add(entry)
         return entry, run_dir, pre_snapshot, staged_input_paths, runner
 
     # docker
@@ -506,6 +515,31 @@ def _submit_and_stage(
         run_status="running",
         run_handle_id=container_id,
         executor="docker",
+    )
+    return entry, run_dir, pre_snapshot, staged_input_paths, runner
+
+
+def _submit_and_stage(
+    session: LedgerSession,
+    spec: ToolSpec,
+    input_files: dict[str, Path],
+    session_dir: Path,
+    params: dict | None,
+    parent_id: str | None,
+) -> tuple[LedgerEntry, Path, dict[str, float], set[str], DockerRunner | CondaRunner]:
+    """Shared setup for submit_tool()/run_tool(): stage inputs, snapshot the
+    run dir BEFORE starting the container (so fast-finishing tools don't
+    race the pre-snapshot), then start the container.
+
+    Returns (entry, run_dir, pre_snapshot, staged_input_paths, runner) —
+    the latter two are needed by run_tool()'s caller to finalize the entry
+    once the container completes; submit_tool() discards them since
+    poll_tool() reconstructs an equivalent snapshot later from disk.
+    """
+    run_id = uuid.uuid4().hex[:20]
+    run_dir = session_dir / "runs" / run_id
+    entry, run_dir, pre_snapshot, staged_input_paths, runner = stage_and_submit(
+        spec, input_files, session_dir, run_dir, params, parent_id
     )
     session.add(entry)
     return entry, run_dir, pre_snapshot, staged_input_paths, runner
@@ -634,7 +668,17 @@ def run_tool(
                     pass
             else:
                 try:
-                    os.killpg(os.getpgid(int(entry.run_handle_id)), signal.SIGKILL)
+                    pid = int(entry.run_handle_id)
+                    # Guard against PID recycling: if we recorded the
+                    # process start time, verify it hasn't been recycled.
+                    start_time_path = run_dir / "_process_start_time.json"
+                    if start_time_path.exists():
+                        expected = json.loads(start_time_path.read_text())
+                        from bioledger.core.engines.protocol import _is_process_alive
+                        if _is_process_alive(pid, expected):
+                            os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    else:
+                        os.killpg(os.getpgid(pid), signal.SIGKILL)
                 except (ValueError, ProcessLookupError, PermissionError):
                     pass
             entry.run_status = "failed"

@@ -340,3 +340,144 @@ class TestSnakefileParameterization:
         )
         assert "collection_inputs" in handle.metadata
         assert "bam" in handle.metadata["collection_inputs"]
+
+
+class TestEngineNativeCrystallize:
+    """Test crystallization of sessions with engine-native entries.
+
+    Engine-native entries (executor=snakemake/nextflow/galaxy) should
+    crystallize to Nextflow processes with no container directive, the
+    engine version baked into a comment, and engine-env.yml pinning the
+    recorded version.
+    """
+
+    def _make_engine_entry(
+        self,
+        name: str,
+        executor: str,
+        executor_version: str,
+        command: str,
+        output_files: list[str],
+    ) -> LedgerEntry:
+        """Create an engine-native LedgerEntry with a recorded version."""
+        files = [
+            FileRef(
+                path=f"/tmp/{fname}", sha256="output_hash",
+                size_bytes=100, role="output",
+            )
+            for fname in output_files
+        ]
+        return LedgerEntry(
+            kind=EntryKind.TOOL_RUN,
+            tool_spec_name=name,
+            executor=executor,
+            executor_version=executor_version,
+            container=ContainerInfo(
+                image="",
+                command=command.split(),
+                input_mapping={},
+            ),
+            files=files,
+            tool_spec_snapshot={
+                "name": name,
+                "container": "",
+                "command": command,
+                "inputs": {},
+                "outputs": {},
+                "parameters": {},
+                "executors": [executor],
+            },
+        )
+
+    def test_snakemake_engine_process_has_version_comment(self):
+        """Snakemake engine process should contain the recorded version."""
+        from bioledger.forges.analysisforge.crystallize import _make_engine_nf_process
+
+        entry = self._make_engine_entry(
+            name="my_snakemake_tool",
+            executor="snakemake",
+            executor_version="snakemake 7.32.4",
+            command="snakemake -s Snakefile",
+            output_files=["result.txt"],
+        )
+        proc = _make_engine_nf_process("step_0_my_snakemake_tool", entry)
+        assert "// Engine: snakemake 7.32.4" in proc
+        assert "container" not in proc.lower() or "//" in proc  # no container directive
+
+    def test_nextflow_engine_process_has_version_comment(self):
+        """Nextflow engine process should contain the recorded version."""
+        from bioledger.forges.analysisforge.crystallize import _make_engine_nf_process
+
+        entry = self._make_engine_entry(
+            name="my_nextflow_tool",
+            executor="nextflow",
+            executor_version="nextflow 23.10.0",
+            command="nextflow run ./myflow.nf",
+            output_files=["result.txt"],
+        )
+        proc = _make_engine_nf_process("step_0_my_nextflow_tool", entry)
+        assert "// Engine: nextflow 23.10.0" in proc
+
+    def test_engine_native_crystallize_roundtrip(self):
+        """Full crystallize round-trip with engine-native entries."""
+        session = LedgerSession(name="EngineNative")
+        e1 = self._make_engine_entry(
+            name="smk_step",
+            executor="snakemake",
+            executor_version="snakemake 7.32.4",
+            command="snakemake -s Snakefile --configfile config.yaml",
+            output_files=["output.txt"],
+        )
+        session.add(e1)
+        e2 = self._make_engine_entry(
+            name="nf_step",
+            executor="nextflow",
+            executor_version="nextflow 23.10.0",
+            command="nextflow run ./main.nf",
+            output_files=["result.bam"],
+        )
+        session.add(e2)
+
+        result = to_nextflow(session)
+        # Both processes present
+        assert "step_0_smk_step" in result
+        assert "step_1_nf_step" in result
+        # Engine versions in process comments
+        assert "// Engine: snakemake 7.32.4" in result
+        assert "// Engine: nextflow 23.10.0" in result
+        # Structurally valid DSL2
+        assert "process" in result
+        assert "workflow" in result
+
+    def test_engine_env_yml_uses_recorded_versions(self):
+        """generate_engine_env_yml should use recorded versions, not live detection."""
+        from unittest.mock import patch
+
+        from bioledger.forges.analysisforge.crystallize import generate_engine_env_yml
+
+        entries = [
+            self._make_engine_entry(
+                name="smk_step",
+                executor="snakemake",
+                executor_version="snakemake 7.32.4",
+                command="snakemake -s Snakefile",
+                output_files=["output.txt"],
+            ),
+            self._make_engine_entry(
+                name="nf_step",
+                executor="nextflow",
+                executor_version="nextflow 23.10.0",
+                command="nextflow run ./main.nf",
+                output_files=["result.bam"],
+            ),
+        ]
+
+        # Mock subprocess.run to ensure it's NOT called when versions are recorded
+        with patch("subprocess.run") as mock_run:
+            yml = generate_engine_env_yml(entries)
+
+        assert yml is not None
+        assert "snakemake=7.32.4" in yml
+        assert "nextflow=23.10.0" in yml
+        # No live subprocess call needed — versions came from the entries
+        mock_run.assert_not_called()

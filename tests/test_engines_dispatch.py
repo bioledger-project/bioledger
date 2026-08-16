@@ -131,8 +131,8 @@ class TestResolveEngineForFanout:
         assert resolve_engine_for_fanout(engine="snakemake") == "snakemake"
 
     def test_config_default(self):
-        cfg = EnginesConfig(default="galaxy")
-        assert resolve_engine_for_fanout(config=cfg) == "galaxy"
+        cfg = EnginesConfig(default="snakemake")
+        assert resolve_engine_for_fanout(config=cfg) == "snakemake"
 
     def test_auto_detect_returns_none_or_engine(self):
         result = _detect_installed_engine()
@@ -146,3 +146,14 @@ class TestResolveEngineForFanout:
         if detected is None:
             with pytest.raises(RuntimeError, match="Fan-out requires"):
                 resolve_engine_for_fanout(config=cfg)
+
+    def test_resolve_engine_for_fanout_galaxy_raises(self):
+        """Galaxy fan-out is not yet supported — should raise NotImplementedError."""
+        with pytest.raises(NotImplementedError, match="Galaxy fan-out"):
+            resolve_engine_for_fanout(engine="galaxy")
+
+    def test_resolve_engine_for_fanout_galaxy_config_raises(self):
+        """Galaxy fan-out via config default should also raise."""
+        cfg = EnginesConfig(default="galaxy")
+        with pytest.raises(NotImplementedError, match="Galaxy fan-out"):
+            resolve_engine_for_fanout(config=cfg)

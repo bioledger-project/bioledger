@@ -105,6 +105,10 @@ Or set it via the `BIOLEDGER_GALAXY_API_KEY` environment variable.
 **Note**: `mode: "planemo"` is for local development only. The config
 validator will warn about this.
 
+**Fan-out/scatter**: Galaxy fan-out is not yet supported. Fan-out (running
+a tool across a collection of files) requires Snakemake or Nextflow. Galaxy
+is supported for single-tool runs and Tool Shed discovery.
+
 See: `examples/cluster/bioledger-galaxy-remote.yaml`
 
 ---

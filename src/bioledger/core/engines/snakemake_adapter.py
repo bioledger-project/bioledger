@@ -183,6 +183,8 @@ class SnakemakeAdapter:
     local execution, no scheduler plugin, no conda mapping.
     """
 
+    _engine_name = "snakemake"
+
     def __init__(self, config: SnakemakeEngineConfig | None = None) -> None:
         self._config = config or SnakemakeEngineConfig()
 
@@ -191,6 +193,14 @@ class SnakemakeAdapter:
         if self._config.executable:
             return self._config.executable
         return _check_snakemake_available()
+
+    def _detect_version(self) -> str:
+        """Detect the snakemake version by shelling out once; cache on the instance."""
+        if hasattr(self, "_cached_version"):
+            return self._cached_version
+        from bioledger.core.engines.versions import detect_engine_version
+        self._cached_version = detect_engine_version(self._engine_name, self.executable)
+        return self._cached_version
 
     def _build_config_yaml(
         self,
@@ -343,11 +353,9 @@ class SnakemakeAdapter:
             run_id=run_id,
             entry_id="",
             work_dir=work_dir,
-            submitted_at=time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-            ),
             status="running",
             process_start_time=process_start_time,
+            metadata={"engine_version": self._detect_version()},
         )
 
     def generate(
@@ -460,11 +468,9 @@ class SnakemakeAdapter:
             run_id=run_id,
             entry_id="",  # set by the caller (dispatch layer)
             work_dir=work_dir,
-            submitted_at=time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-            ),
             status="running",
             process_start_time=process_start_time,
+            metadata={"engine_version": self._detect_version()},
         )
 
     def poll(self, run_handle: RunHandle) -> RunStatus | None:

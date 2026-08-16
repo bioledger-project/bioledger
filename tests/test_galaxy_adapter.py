@@ -49,52 +49,16 @@ class _MockSpec:
 
 
 class TestGalaxyGenerate:
-    def test_generate_produces_ga_workflow(self, tmp_path):
-        adapter = GalaxyAdapter()
-        spec = _MockSpec()
-        handle = adapter.generate(spec=spec, input_mapping={"bam": "data/*.bam"})
-        content = handle.artifact_path.read_text()
-        data = json.loads(content)
-        assert data["a_galaxy_workflow"] == "true"
-        assert "steps" in data
-        assert handle.executor == "galaxy"
-        assert "samtools_sort" in handle.step_inventory
+    """Galaxy fan-out is deferred — generate() raises NotImplementedError."""
 
-    def test_generate_has_tool_step(self, tmp_path):
-        adapter = GalaxyAdapter()
-        spec = _MockSpec()
-        handle = adapter.generate(spec=spec, input_mapping={"bam": "data/*.bam"})
-        data = json.loads(handle.artifact_path.read_text())
-        # Step 1 should be the tool step
-        tool_step = data["steps"]["1"]
-        assert tool_step["type"] == "tool"
-        assert tool_step["tool_id"] == "samtools_sort"
+    def test_generate_raises_deferred(self):
+        """GalaxyAdapter.generate() raises NotImplementedError for fan-out."""
+        import pytest
 
-    def test_generate_has_data_input_step(self, tmp_path):
         adapter = GalaxyAdapter()
         spec = _MockSpec()
-        handle = adapter.generate(spec=spec, input_mapping={"bam": "data/*.bam"})
-        data = json.loads(handle.artifact_path.read_text())
-        # Step 0 should be data input
-        input_step = data["steps"]["0"]
-        assert input_step["type"] == "data_input"
-
-    def test_generate_collection_input_adds_collection_step(self, tmp_path):
-        adapter = GalaxyAdapter()
-        spec = _MockSpec()
-        handle = adapter.generate(spec=spec, input_mapping={"bam": "data/*.bam"})
-        data = json.loads(handle.artifact_path.read_text())
-        # Step 2 should be data collection input
-        assert "2" in data["steps"]
-        coll_step = data["steps"]["2"]
-        assert coll_step["type"] == "data_collection_input"
-
-    def test_generate_stores_collection_inputs(self, tmp_path):
-        adapter = GalaxyAdapter()
-        spec = _MockSpec()
-        handle = adapter.generate(spec=spec, input_mapping={"bam": "data/*.bam"})
-        assert "collection_inputs" in handle.metadata
-        assert "bam" in handle.metadata["collection_inputs"]
+        with pytest.raises(NotImplementedError, match="Galaxy fan-out"):
+            adapter.generate(spec=spec, input_mapping={"bam": "data/*.bam"})
 
 
 class TestGalaxyToolAvailability:

@@ -12,13 +12,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from bioledger.toolspec.models import (
-    ExecutionSpec,
-    ParamType,
-    ToolInput,
-    ToolOutput,
-)
-
 logger = logging.getLogger(__name__)
 
 NFCORE_MODULES_REPO = "nf-core/modules"
@@ -140,8 +133,6 @@ def parse_meta_yml(module_dir: Path) -> dict:
     file rather than regex-parsing ``main.nf``, making it robust to complex
     DSL2 patterns (tuple inputs, meta maps, config objects).
     """
-    import re
-
     meta_path = module_dir / "meta.yml"
     if not meta_path.exists():
         logger.warning("meta.yml not found in %s", module_dir)
@@ -206,85 +197,3 @@ def parse_meta_yml(module_dir: Path) -> dict:
         "outputs": outputs,
         "container": container,
     }
-
-
-def parse_module_to_spec(module_dir: Path) -> ExecutionSpec:
-    """Parse a downloaded nf-core module main.nf into a minimal ExecutionSpec.
-
-    Extracts process name, container, inputs, outputs — enough for
-    submit_spec() to generate a Nextflow workflow.
-    """
-    nf_path = module_dir / "main.nf"
-    if not nf_path.exists():
-        raise FileNotFoundError(f"main.nf not found in {module_dir}")
-
-    content = nf_path.read_text()
-
-    # Extract process name
-    name_match = re.search(r"process\s+(\w+)\s*\{", content)
-    name = name_match.group(1) if name_match else "unknown"
-
-    # Extract container
-    container = ""
-    container_match = re.search(r"container\s+['\"]([^'\"]+)['\"]", content)
-    if container_match:
-        container = container_match.group(1)
-
-    # Extract input declarations
-    inputs: dict[str, ToolInput] = {}
-    input_block = re.search(
-        r"input:\s*\n(.*?)(?=\n\s*(output:|script:|shell:|exec:))",
-        content,
-        re.DOTALL,
-    )
-    if input_block:
-        for line in input_block.group(1).strip().splitlines():
-            line = line.strip()
-            # Match "path <name>" or "tuple val(x), path(y)" patterns
-            path_match = re.search(r"path\s*\(?(\w+)\)?", line)
-            if path_match:
-                inp_name = path_match.group(1)
-                inputs[inp_name] = ToolInput(
-                    name=inp_name,
-                    type=ParamType.FILE,
-                    format="any",
-                )
-
-    # Extract output declarations
-    outputs: dict[str, ToolOutput] = {}
-    output_block = re.search(
-        r"output:\s*\n(.*?)(?=\n\s*(script:|shell:|exec:))",
-        content,
-        re.DOTALL,
-    )
-    if output_block:
-        for line in output_block.group(1).strip().splitlines():
-            line = line.strip()
-            # Match 'path "pattern", emit: <name>'
-            emit_match = re.search(r"emit:\s*(\w+)", line)
-            if emit_match:
-                out_name = emit_match.group(1)
-                pattern_match = re.search(r'["\']([^"\']+)["\']', line)
-                pattern = pattern_match.group(1) if pattern_match else ""
-                outputs[out_name] = ToolOutput(
-                    name=out_name,
-                    type=ParamType.FILE,
-                    format="any",
-                    pattern=pattern,
-                )
-
-    # Build a minimal command — the actual script is in the process block
-    # For ExecutionSpec, we use a placeholder that references inputs
-    first_input = list(inputs.keys())[0] if inputs else "input"
-    command = f"{name} {{{{ inputs.{first_input} }}}}"
-
-    return ExecutionSpec(
-        name=name,
-        version="",
-        description="",
-        container=container,
-        command=command,
-        inputs=inputs,
-        outputs=outputs,
-        executors=["nextflow"],
-    )

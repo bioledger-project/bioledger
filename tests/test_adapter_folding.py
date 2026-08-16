@@ -116,10 +116,18 @@ class TestPollPendingJobsAdapterFolding:
         mock_adapter.poll.return_value = RunStatus(
             state="completed", completed=5, total=5
         )
+        mock_adapter.collect.return_value = []
 
-        with patch(
-            "bioledger.core.engines.dispatch._get_engine_adapter",
-            return_value=mock_adapter,
+        mock_meta = {"work_dir": "/tmp/work", "run_id": "99999999"}
+        with (
+            patch(
+                "bioledger.core.engines.dispatch._get_engine_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "bioledger.forges.analysisforge.agent._read_engine_metadata_sidecar",
+                return_value=mock_meta,
+            ),
         ):
             result = agent.poll_pending_jobs()
 
@@ -150,10 +158,18 @@ class TestPollPendingJobsAdapterFolding:
         mock_adapter.poll.return_value = RunStatus(
             state="failed", message="2/5 jobs failed"
         )
+        mock_adapter.collect.return_value = []
 
-        with patch(
-            "bioledger.core.engines.dispatch._get_engine_adapter",
-            return_value=mock_adapter,
+        mock_meta = {"work_dir": "/tmp/work", "run_id": "99999999"}
+        with (
+            patch(
+                "bioledger.core.engines.dispatch._get_engine_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "bioledger.forges.analysisforge.agent._read_engine_metadata_sidecar",
+                return_value=mock_meta,
+            ),
         ):
             result = agent.poll_pending_jobs()
 

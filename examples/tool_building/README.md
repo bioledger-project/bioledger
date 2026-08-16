@@ -187,6 +187,93 @@ assistant> Submitted seqtk_galaxy as job abc123 (engine: galaxy).
 
 ---
 
+## Wrapping native workflow engines
+
+The examples above show single-tool specs. You can also wrap an **existing
+workflow** (a local Snakefile, an nf-core pipeline, or a planemo/Galaxy tool)
+by authoring a toolspec whose `command` field invokes the native engine.
+There is no separate "workflow file" field — the `command` field *is* the
+wrapper. Inputs and outputs declared on the spec are used for staging,
+provenance, and crystallize channel wiring, just like any other spec.
+
+### Local Snakefile
+
+```yaml
+execution:
+  name: my_snakemake_workflow
+  executors: [snakemake]
+  command: >-
+    snakemake -s Snakefile --configfile config.yaml
+  inputs:
+    config:
+      type: file
+      format: yaml
+      required: true
+      description: "Snakemake config file"
+  outputs:
+    results:
+      pattern: "results/*.txt"
+```
+
+The `command` is the engine invocation. If your Snakefile takes input files
+as config values, pass them via Jinja:
+
+```yaml
+  command: >-
+    snakemake -s Snakefile --config input_bam={{inputs.input_bam}} --outdir {{outputs._dir}}
+```
+
+### nf-core workflow
+
+```yaml
+execution:
+  name: rnaseq_pipeline
+  executors: [nextflow]
+  command: >-
+    nextflow run nf-core/rnaseq -r 3.14.0
+    --input {{inputs.samplesheet}}
+    --outdir {{outputs._dir}}
+  inputs:
+    samplesheet:
+      type: file
+      format: csv
+      required: true
+```
+
+Note: for **discovered** nf-core modules, `submit_discovered` handles the
+wrapping automatically (see [Tool discovery](../tool_discovery/)). This
+example is for wrapping a whole nf-core *pipeline* by hand.
+
+### planemo/Galaxy tool
+
+```yaml
+execution:
+  name: my_galaxy_tool
+  executors: [galaxy]
+  command: >-
+    planemo run {{inputs.tool_xml}}
+    --input {{inputs.input_dataset}}
+    --output {{outputs._dir}}/out.bam
+  inputs:
+    tool_xml:
+      type: file
+      format: xml
+      required: true
+      description: "Galaxy tool XML wrapper"
+    input_dataset:
+      type: file
+      required: true
+```
+
+### Snakemake discovery asymmetry
+
+Snakemake does not have a first-class tool discovery registry analogous to
+the Galaxy Tool Shed or nf-core modules. To use a snakemake wrapper or a
+local Snakefile, author a toolspec by hand as shown above. (A future release
+may add discovery for [snakemake-wrappers](https://github.com/snakemake/snakemake-wrappers).)
+
+---
+
 ## Validation rules by executor
 
 | Rule | docker | conda | nextflow/snakemake/galaxy |

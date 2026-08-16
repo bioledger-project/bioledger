@@ -245,9 +245,10 @@ class TestRunToolConda:
         sidecar_names = [Path(f.path).name for f in entry.files]
         assert "_process_start_time.json" not in sidecar_names
 
+    @patch("bioledger.forges.analysisforge.executor.os.kill")
     @patch("bioledger.forges.analysisforge.executor.os.killpg")
     @patch("bioledger.forges.analysisforge.executor.os.getpgid")
-    def test_run_tool_conda_timeout_kills_process_group(self, mock_getpgid, mock_killpg, tmp_path):
+    def test_run_tool_conda_timeout_kills_process_group(self, mock_getpgid, mock_killpg, mock_kill, tmp_path):
         """Timeout in conda run_tool should kill the process group, not use Docker kill."""
         session = LedgerSession(name="timeout-test")
         session_dir = tmp_path / "sessions" / session.id

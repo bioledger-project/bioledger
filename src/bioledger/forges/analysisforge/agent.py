@@ -60,7 +60,11 @@ def _write_engine_metadata_sidecar(
         "work_dir": str(run_handle.work_dir),
         "run_id": run_handle.run_id,
         "executor": run_handle.executor,
-        "submitted_at": str(run_handle.submitted_at),
+        "submitted_at": (
+            run_handle.submitted_at.isoformat()
+            if hasattr(run_handle.submitted_at, "isoformat")
+            else str(run_handle.submitted_at)
+        ),
         "status": run_handle.status,
     }
     if run_handle.process_start_time is not None:
@@ -824,18 +828,30 @@ class AnalysisForgeAgent:
                     meta = _read_engine_metadata_sidecar(
                         session_dir, entry.id,
                     )
+                    if not meta:
+                        logging.warning(
+                            "No engine metadata sidecar for entry %s — "
+                            "cannot poll, marking as failed",
+                            entry.id,
+                        )
+                        entry.run_status = "failed"
+                        entry.notes = (
+                            (entry.notes + "\n" if entry.notes else "")
+                            + "Engine metadata sidecar lost — cannot poll"
+                        )
+                        newly_completed.append(entry)
+                        changed = True
+                        continue
                     rh = RunHandle(
                         executor=executor,
                         run_id=entry.run_handle_id or "",
                         entry_id=entry.id,
-                        work_dir=Path(meta["work_dir"]) if meta else session_dir,
+                        work_dir=Path(meta["work_dir"]),
                         metadata=(
                             {"planemo_pid": meta["planemo_pid"]}
-                            if meta and "planemo_pid" in meta else {}
+                            if "planemo_pid" in meta else {}
                         ),
-                        process_start_time=(
-                            meta.get("process_start_time") if meta else None
-                        ),
+                        process_start_time=meta.get("process_start_time"),
                     )
                     status = adapter.poll(rh)
                     if status is not None and status.state in (
@@ -844,7 +860,7 @@ class AnalysisForgeAgent:
                         _finalize_engine_entry(
                             entry, rh, rh.work_dir, adapter, status,
                         )
-                except (NotImplementedError, RuntimeError) as e:
+                except Exception as e:
                     logging.warning(
                         "Cannot poll entry %s with executor %s: %s",
                         entry.id, executor, e,
@@ -1033,6 +1049,7 @@ class AnalysisForgeAgent:
 
         # Update entry with run handle
         entry.run_handle_id = run_handle.run_id
+        entry.executor_version = run_handle.metadata.get("engine_version", "")
         self.store.save_session(self.session)
 
         return entry, handle
@@ -1109,7 +1126,9 @@ class AnalysisForgeAgent:
                 version="",
                 description="",
                 container=meta["container"],
-                command=f"nextflow run {{{{inputs.{first_input}}}}}",
+                command=f"// nf-core module — include from modules/{subdir}/main.nf\n"
+                        f"// This process is a wrapper; the actual logic is in the module file.\n"
+                        f"// Input: {{{{inputs.{first_input}}}}}",
                 inputs=inputs,
                 outputs=outputs,
                 executors=["nextflow"],
@@ -1165,6 +1184,7 @@ class AnalysisForgeAgent:
         )
 
         entry.run_handle_id = run_handle.run_id
+        entry.executor_version = run_handle.metadata.get("engine_version", "")
         self.store.save_session(self.session)
 
         return entry, run_handle

@@ -240,13 +240,17 @@ def _make_engine_nf_process(proc: str, entry: LedgerEntry) -> str:
     # Render it with Jinja using Nextflow-style variables, same as docker/conda.
     script = _render_script_for_nextflow(entry, input_names)
 
-    # Engine-specific comment for the process block
+    # Engine-specific comment for the process block, including recorded version
+    # executor_version is stored as "<engine> <version>" (e.g. "snakemake 7.32.4");
+    # extract just the version part to avoid duplicating the engine name.
+    raw_ver = entry.executor_version or "unknown"
+    ver = _extract_version(executor, raw_ver) if raw_ver != "unknown" else "unknown"
     engine_comments = {
-        "snakemake": "// No container — snakemake runs on host, manages its own containers",
-        "galaxy": "// No container — planemo/galaxy runs on host, manages its own job execution",
-        "nextflow": "// No container — nextflow manages its own",
+        "snakemake": f"// Engine: snakemake {ver} (recorded at run time; runs on host, manages its own containers)",
+        "galaxy":    f"// Engine: planemo/galaxy {ver} (recorded at run time; runs on host, manages its own job execution)",
+        "nextflow":  f"// Engine: nextflow {ver} (recorded at run time; manages its own)",
     }
-    comment = engine_comments.get(executor, "// No container — engine runs on host")
+    comment = engine_comments.get(executor, f"// No container — engine {executor} {ver} runs on host")
 
     return f"""
 process {proc} {{
@@ -370,14 +374,40 @@ def _detect_engine_versions(entries: list[LedgerEntry]) -> dict[str, str]:
     return versions
 
 
+# Re-export from the shared versions module for backwards compatibility.
+from bioledger.core.engines.versions import _extract_version  # noqa: F401,E402
+
+
+def _recorded_engine_versions(entries: list[LedgerEntry]) -> dict[str, str]:
+    """Collect engine versions recorded on ledger entries at submit time.
+
+    Falls back to live detection (``_detect_engine_versions``) for engines
+    present in the entries but with an empty ``executor_version`` (legacy
+    entries created before the field existed).
+    """
+    versions: dict[str, str] = {}
+    for entry in entries:
+        if entry.executor in ("snakemake", "nextflow", "galaxy") and entry.executor_version:
+            versions[entry.executor] = entry.executor_version
+    # Fall back to live detection for engines present but with empty version
+    present = {e.executor for e in entries if e.executor in ("snakemake", "nextflow", "galaxy")}
+    missing = present - set(versions)
+    if missing:
+        live = _detect_engine_versions(entries)
+        for e in missing:
+            versions[e] = live.get(e, "unknown")
+    return versions
+
+
 def generate_engine_env_yml(entries: list[LedgerEntry]) -> str | None:
     """Generate an engine-env.yml conda env file for engine entries.
 
     Returns None if no engine entries are present. The YAML pins engine
-    versions detected on the current machine. If an engine isn't installed,
-    emits a comment instead of a dependency line.
+    versions recorded at submit time (from ``LedgerEntry.executor_version``).
+    Falls back to live detection for legacy entries without a recorded version.
+    If an engine isn't installed, emits a comment instead of a dependency line.
     """
-    versions = _detect_engine_versions(entries)
+    versions = _recorded_engine_versions(entries)
     if not versions:
         return None
 
@@ -394,8 +424,7 @@ def generate_engine_env_yml(entries: list[LedgerEntry]) -> str | None:
         if version.startswith("not installed"):
             lines.append(f"  # {engine}: {version}")
         else:
-            parts = version.split()
-            ver = parts[-1] if parts else "latest"
+            ver = _extract_version(engine, version)
             lines.append(f"  - {engine}={ver}")
     return "\n".join(lines) + "\n"
 

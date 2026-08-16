@@ -221,6 +221,8 @@ class NextflowAdapter:
     Container support is via Nextflow's native docker/singularity profiles.
     """
 
+    _engine_name = "nextflow"
+
     def __init__(self, config: NextflowEngineConfig | None = None) -> None:
         self._config = config or NextflowEngineConfig()
 
@@ -229,6 +231,14 @@ class NextflowAdapter:
         if self._config.executable:
             return self._config.executable
         return _check_nextflow_available()
+
+    def _detect_version(self) -> str:
+        """Detect the nextflow version by shelling out once; cache on the instance."""
+        if hasattr(self, "_cached_version"):
+            return self._cached_version
+        from bioledger.core.engines.versions import detect_engine_version
+        self._cached_version = detect_engine_version(self._engine_name, self.executable)
+        return self._cached_version
 
     def _build_params_json(
         self,
@@ -367,11 +377,9 @@ class NextflowAdapter:
             run_id=run_id,
             entry_id="",
             work_dir=work_dir,
-            submitted_at=time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-            ),
             status="running",
             process_start_time=process_start_time,
+            metadata={"engine_version": self._detect_version()},
         )
 
     def generate(
@@ -481,11 +489,9 @@ class NextflowAdapter:
             run_id=run_id,
             entry_id="",
             work_dir=work_dir,
-            submitted_at=time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-            ),
             status="running",
             process_start_time=process_start_time,
+            metadata={"engine_version": self._detect_version()},
         )
 
     def poll(self, run_handle: RunHandle) -> RunStatus | None:

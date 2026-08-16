@@ -110,14 +110,6 @@ def _check_snakemake(
 ) -> None:
     """Snakemake-specific checks."""
     smk = config.snakemake
-    if smk.container_runtime == "none":
-        result.warnings.append(ValidationWarning(
-            engine="snakemake",
-            message="container_runtime is 'none' — containerized tools "
-                    "will run natively without isolation",
-            hint="Set container_runtime to 'apptainer', 'singularity', "
-                 "or 'conda' for containerized tools",
-        ))
     if smk.jobs == 1 and smk.extra_args and any(
         "cluster" in arg for arg in smk.extra_args
     ):
@@ -150,9 +142,7 @@ def _check_container_mismatches(
 ) -> None:
     """Check if specs with containers will work with the configured runtimes."""
     has_container_specs = any(
-        getattr(getattr(s, "container", None), "image", None)
-        or getattr(s, "container", None)
-        for s in specs
+        getattr(s, "container", None) for s in specs
     )
     has_conda_specs = any(
         getattr(s, "conda_deps", None) for s in specs

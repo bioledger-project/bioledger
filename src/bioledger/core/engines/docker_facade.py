@@ -1,7 +1,7 @@
 """DockerRunner facade implementing the ExecutionAdapter protocol.
 
 Wraps the existing ``DockerRunner`` so single-tool Docker runs can go through
-the same ``dispatch()`` path as engine-submitted runs. Only implements
+the same ``dispatch()`` path as engine-submitted runs. Implements
 ``submit_spec()`` and ``poll()`` — ``generate()`` raises NotImplementedError
 because Docker cannot fan-out (fan-out requires a real workflow engine).
 """
@@ -23,12 +23,11 @@ class DockerRunnerFacade:
     Native conda execution (``executor="conda"``) is handled by
     ``CondaRunnerFacade``.
 
-    Note: ``submit_spec()`` here is a thin wrapper — the existing executor.py
-    functions (``run_tool``, ``submit_tool``, ``poll_tool``) already handle
-    staging, command rendering, and entry creation. This facade exists so
-    ``dispatch()`` has a uniform interface; the heavy lifting stays in
-    executor.py for now. Phase 2b will fold ``check_job_status`` /
-    ``poll_pending_jobs`` to call ``adapter.poll()`` uniformly.
+    ``submit_spec()`` delegates to ``executor.stage_and_submit()`` so that
+    ``dispatch()`` → ``adapter.submit_spec()`` works uniformly for Docker
+    runs. The created ``LedgerEntry`` is carried in
+    ``RunHandle.metadata["ledger_entry"]`` so the caller can attach it to
+    the session.
     """
 
     def __init__(self, runner: DockerRunner | None = None) -> None:
@@ -49,18 +48,31 @@ class DockerRunnerFacade:
     ) -> RunHandle:
         """Submit a single tool run via Docker.
 
-        This is a synchronous stub — the actual staging and command rendering
-        live in executor.py's ``_submit_and_stage``. This facade returns
-        a placeholder handle; the real submission is done by executor.py.
-
-        For the Phase 1 protocol surface, this method exists to satisfy the
-        protocol. The dispatch path for Docker runs still goes through
-        executor.py directly; Phase 2b will route through here.
+        Delegates to ``executor.stage_and_submit()`` for staging, command
+        rendering, container launch, and ``LedgerEntry`` creation. The
+        created entry is carried in ``RunHandle.metadata["ledger_entry"]``
+        so the caller can attach it to the session.
         """
-        raise NotImplementedError(
-            "DockerRunnerFacade.submit_spec is not yet wired — "
-            "Docker runs still go through executor.py directly. "
-            "This will be connected in Phase 2b when dispatch() is unified."
+        from bioledger.forges.analysisforge.executor import (
+            _spec_to_toolspec,
+            stage_and_submit,
+        )
+
+        toolspec = _spec_to_toolspec(spec)
+        input_files = {k: Path(v) for k, v in input_mapping.items()}
+        # work_dir is the per-run dir; session_dir is its parent's parent
+        # (sessions/<id>/runs/<run_id> → sessions/<id>)
+        session_dir = work_dir.parent.parent
+        entry, run_dir, _, _, _ = stage_and_submit(
+            toolspec, input_files, session_dir, work_dir, params, None
+        )
+        return RunHandle(
+            executor="docker",
+            run_id=entry.run_handle_id or "",
+            entry_id=entry.id,
+            work_dir=run_dir,
+            status="running",
+            metadata={"ledger_entry": entry},
         )
 
     def generate(

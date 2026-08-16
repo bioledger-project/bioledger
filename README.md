@@ -82,7 +82,7 @@ ISA-Tab to reproducible package without writing workflow syntax. See the [full w
 - **[Building tool specs](examples/tool_building/)** — author BioLedger tool specs manually for Docker, Conda, Nextflow, and Galaxy executors
 - **[CSV to ISA-Tab](examples/csv_to_isatab/)** — start from a plain samplesheet and convert to structured metadata
 - **[Variant calling on *L. donovani*](examples/variant_calling/)** — use the public library repos to discover tools and data, then run a full pipeline end-to-end
-- **Fan-out scatter** — run a tool across a collection of files using a workflow engine (requires `bioledger[snakemake]` or `bioledger[nextflow]`)
+- **Fan-out scatter** — run a tool across a collection of files using Snakemake or Nextflow (requires `bioledger[snakemake]` or `bioledger[nextflow]`; Galaxy fan-out is not yet supported)
 
 ## Prerequisites
 
@@ -316,7 +316,7 @@ For **multi-engine sessions** (entries from 2+ distinct executors, e.g. Docker +
 
 ### Multi-Engine Execution
 
-BioLedger supports three workflow engines for fan-out (scatter) operations and native workflow toolspecs. Each engine is an optional pip extra — the core package works with Docker only.
+BioLedger supports three workflow engines for fan-out (scatter) operations and native workflow toolspecs. Each engine is an optional pip extra — the core package works with Docker only. **Note:** fan-out/scatter is currently supported via Snakemake and Nextflow only; Galaxy is supported for single-tool runs and Tool Shed discovery but not yet for fan-out.
 
 | Engine | Install Extra | Requires |
 |--------|--------------|----------|
