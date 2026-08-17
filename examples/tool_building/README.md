@@ -2,12 +2,11 @@
 
 How to author BioLedger tool specs manually — wrapping third-party tools, custom scripts, or existing workflow engine tools. These specs live in your local store and can be used in sessions, fan-out, and crystallization.
 
-This example covers three execution backends:
+This example covers four execution backends:
 
 | Spec | Executor | What it shows |
 |------|----------|---------------|
-| `samtools_sort_docker.bioledger.yaml` | `docker` | Standard containerized tool |
-| `samtools_sort_conda.bioledger.yaml` | `conda` | Conda deps instead of explicit container (auto-derived) |
+| `samtools_sort.bioledger.yaml` | `docker` + `conda` | Dual-executor tool — Docker auto-derives image from `conda_deps`, Conda creates native env |
 | `fastqc_nextflow.bioledger.yaml` | `nextflow` | Nextflow engine executor (no container field) |
 | `seqtk_galaxy.bioledger.yaml` | `galaxy` | Galaxy engine executor (runs via planemo) |
 
@@ -24,8 +23,8 @@ execution:
   name: my_tool              # unique identifier
   version: "1.0"             # upstream tool version
   description: "What it does"
-  container: "image:tag"     # required for docker executor
-  executors: [docker]        # how this tool runs
+  container: "image:tag"     # explicit image, or omit to auto-derive from conda_deps
+  executors: [docker]        # how this tool runs (docker, conda, or both)
   command: >-                # Jinja2 template
     my_tool {{inputs.data}} -o {{outputs._dir}}/result.txt
   inputs: { ... }
@@ -43,45 +42,21 @@ See `src/bioledger/toolspec/README.md` for the full schema reference.
 
 ---
 
-## 1. Docker executor — `samtools_sort_docker.bioledger.yaml`
+## 1. Docker + Conda (dual executor) — `samtools_sort.bioledger.yaml`
 
-The most common case: a tool in a Docker container.
-
-```yaml
-execution:
-  name: samtools_sort_docker
-  container: "quay.io/biocontainers/samtools:1.17--h00cdaf9_0"
-  executors: [docker]
-  command: >-
-    samtools sort -@ {{parameters.threads}}
-    -o {{outputs._dir}}/sorted.bam
-    {{inputs.input_bam}}
-```
-
-**Key points:**
-- `container` is required — a fully qualified Docker image URI
-- `executors: [docker]` is the default (can be omitted)
-- BioLedger runs this via `docker run --rm` with inputs mounted at `/input/` and outputs collected from `/output/`
-
-**Import and validate:**
-```bash
-bioledger tool import examples/tool_building/samtools_sort_docker.bioledger.yaml
-bioledger tool validate ~/.bioledger/tools/samtools_sort_docker.bioledger.yaml
-```
-
----
-
-## 2. Conda executor — `samtools_sort_conda.bioledger.yaml`
-
-Same tool, but instead of specifying a container image, you declare conda dependencies. BioLedger creates a native conda environment and runs the tool via `conda run`.
+The most common case: a tool that can run via Docker or native Conda. A single
+spec declares `conda_deps` and lists both executors — no explicit `container`
+field is needed. Docker auto-derives the image from `conda_deps` via
+[BioContainers](https://biocontainers.pro/); Conda creates a native environment
+and runs via `conda run`.
 
 ```yaml
 execution:
-  name: samtools_sort_conda
-  executors: [conda]
+  name: samtools_sort
+  # No explicit container — Docker auto-derives from conda_deps via BioContainers
+  executors: [docker, conda]
   conda_deps:
     - "samtools=1.17"
-  # no container field — runs via native conda environment
   command: >-
     samtools sort -@ {{parameters.threads}}
     -o {{outputs._dir}}/sorted.bam
@@ -89,21 +64,28 @@ execution:
 ```
 
 **Key points:**
-- `container` is omitted — BioLedger creates a conda environment from `conda_deps` and runs via `conda run`
-- `executors: [conda]` signals native conda execution
-- Environments are named deterministically (`bioledger_<hash>`) and cached for reuse
+- `executors: [docker, conda]` — BioLedger picks the available backend at runtime (Docker if installed, else Conda)
+- `conda_deps` is the single source of truth for the tool's dependencies — Docker derives the image, Conda builds the env
+- Omit `container` to let Docker auto-derive; set it explicitly only if you need a specific image tag
+- Conda environments are named deterministically (`bioledger_<hash>`) and cached for reuse
 - If `mamba` is on PATH, it's used instead of `conda` for faster env solves
-- A spec with `executors: [docker, conda]` and no container can run either way: Docker auto-derives the image from `conda_deps` via BioContainers; Conda creates a native env
+- BioLedger runs Docker via `docker run --rm` with inputs mounted at `/input/` and outputs collected from `/output/`
 
 **Import and validate:**
 ```bash
-bioledger tool import examples/tool_building/samtools_sort_conda.bioledger.yaml
-bioledger tool validate ~/.bioledger/tools/samtools_sort_conda.bioledger.yaml
+bioledger tool import examples/tool_building/samtools_sort.bioledger.yaml
+bioledger tool validate ~/.bioledger/tools/samtools_sort.bioledger.yaml
+```
+
+**Run in a session:**
+```
+you> run samtools_sort on the bam file
+assistant> Submitted samtools_sort as job abc123 (executor: docker).
 ```
 
 ---
 
-## 3. Nextflow executor — `fastqc_nextflow.bioledger.yaml`
+## 2. Nextflow executor — `fastqc_nextflow.bioledger.yaml`
 
 For tools that should run via the Nextflow workflow engine. BioLedger generates a Nextflow DSL2 process from the spec using `to_nextflow_process()`.
 
@@ -136,7 +118,7 @@ assistant> Submitted fastqc_nextflow as job abc123 (engine: nextflow).
 
 ---
 
-## 4. Galaxy executor — `seqtk_galaxy.bioledger.yaml`
+## 3. Galaxy executor — `seqtk_galaxy.bioledger.yaml`
 
 For tools that should run via Galaxy (local planemo or remote Galaxy instance).
 
@@ -278,8 +260,9 @@ may add discovery for [snakemake-wrappers](https://github.com/snakemake/snakemak
 
 | Rule | docker | conda | nextflow/snakemake/galaxy |
 |------|--------|-------|---------------------------|
-| `container` required? | Yes | No (runs via conda env from `conda_deps`) | No (not allowed) |
-| `conda_deps` required? | No | Yes | No (not allowed) |
+| `container` required? | No — auto-derived from `conda_deps` if omitted | No (runs via conda env from `conda_deps`) | No (not allowed) |
+| `conda_deps` required? | Only if `container` is omitted | Yes | No (not allowed) |
+| Can combine with conda? | Yes — `executors: [docker, conda]` | Yes | No (engine executors are exclusive) |
 | At most one engine executor? | — | — | Yes (e.g. cannot have both `nextflow` and `galaxy`) |
 
 Run `bioledger tool validate <path> --strict` to catch warnings too.
@@ -295,12 +278,12 @@ Once imported, specs are available in sessions and for fan-out:
 bioledger tool list
 
 # Show details
-bioledger tool show samtools_sort_docker
+bioledger tool show samtools_sort
 
 # Run in a session
 bioledger session new my-analysis
 bioledger resume my-analysis
-# > run samtools_sort_docker on the bam file
+# > run samtools_sort on the bam file
 ```
 
 ---

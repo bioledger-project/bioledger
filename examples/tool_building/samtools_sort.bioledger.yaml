@@ -1,12 +1,16 @@
 spec_version: "0.1"
 revision: "1"
 execution:
-  name: samtools_sort_docker
+  name: samtools_sort
   version: "1.17"
-  description: "Sort a BAM file by coordinate (Docker executor)"
-  container: "quay.io/biocontainers/samtools:1.17--h00cdaf9_0"
+  description: "Sort a BAM file by coordinate (Docker or Conda executor)"
+  # No explicit container — Docker auto-derives the image from conda_deps
+  # via BioContainers. Conda creates a native env from conda_deps instead.
   executors:
     - docker
+    - conda
+  conda_deps:
+    - "samtools=1.17"
   command: >-
     samtools sort -@ {{parameters.threads}}
     -o {{outputs._dir}}/sorted.bam
