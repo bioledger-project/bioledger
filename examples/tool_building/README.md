@@ -7,8 +7,8 @@ This example covers four execution backends:
 | Spec | Executor | What it shows |
 |------|----------|---------------|
 | `samtools_sort.bioledger.yaml` | `docker` + `conda` | Dual-executor tool — Docker auto-derives image from `conda_deps`, Conda creates native env |
-| `fastqc_nextflow.bioledger.yaml` | `nextflow` | Nextflow engine executor (no container field) |
-| `seqtk_galaxy.bioledger.yaml` | `galaxy` | Galaxy engine executor (runs via planemo) |
+| `nfcore_rnaseq.bioledger.yaml` | `nextflow` | Wrapping an nf-core pipeline as a tool spec |
+| `seqtk_galaxy.bioledger.yaml` | `galaxy` | Wrapping a planemo/Galaxy tool as a tool spec |
 
 ---
 
@@ -85,35 +85,41 @@ assistant> Submitted samtools_sort as job abc123 (executor: docker).
 
 ---
 
-## 2. Nextflow executor — `fastqc_nextflow.bioledger.yaml`
+## 2. Nextflow executor — `nfcore_rnaseq.bioledger.yaml`
 
-For tools that should run via the Nextflow workflow engine. BioLedger generates a Nextflow DSL2 process from the spec using `to_nextflow_process()`.
+Engine executors (`nextflow`, `snakemake`, `galaxy`) are for wrapping **existing
+workflows and modules** — not individual tools. If you want to run fastqc, write
+a docker/conda spec (see section 1). If you want to run an nf-core pipeline like
+`nf-core/rnaseq`, wrap it with a nextflow executor spec:
 
 ```yaml
 execution:
-  name: fastqc_nextflow
+  name: nfcore_rnaseq
   executors: [nextflow]
-  # no container — the Nextflow engine manages its own environment
+  # No container/conda_deps — Nextflow manages its own environment via profiles
   command: >-
-    fastqc {{inputs.reads}} -o {{outputs._dir}} -t {{parameters.threads}}
+    nextflow run nf-core/rnaseq -r 3.14.0
+    --input {{inputs.samplesheet}}
+    --outdir {{outputs._dir}}
+    -profile test,docker
 ```
 
 **Key points:**
 - `container` and `conda_deps` are **not allowed** when `executors` contains only engine types (`nextflow`, `snakemake`, `galaxy`) — the engine manages its own environment
-- BioLedger translates the `command`, `inputs`, `outputs`, and `parameters` into a Nextflow process block with proper `input:`, `output:`, and `script:` sections
-- At runtime, the Nextflow adapter generates a complete `main.nf` with channels wired from `input_mapping` and runs `nextflow run`
+- The `command` field is the full `nextflow run` invocation — BioLedger stages inputs and runs it as a subprocess
+- For **discovered** nf-core modules (single modules, not whole pipelines), use `bioledger tool search` and the agent's `submit_discovered` path — see [Tool discovery](../tool_discovery/)
 - Requires `bioledger[nextflow]` — install Nextflow separately
 
 **Import and validate:**
 ```bash
-bioledger tool import examples/tool_building/fastqc_nextflow.bioledger.yaml
-bioledger tool validate ~/.bioledger/tools/fastqc_nextflow.bioledger.yaml
+bioledger tool import examples/tool_building/nfcore_rnaseq.bioledger.yaml
+bioledger tool validate ~/.bioledger/tools/nfcore_rnaseq.bioledger.yaml
 ```
 
 **Run in a session:**
 ```
-you> run fastqc_nextflow on the raw reads
-assistant> Submitted fastqc_nextflow as job abc123 (engine: nextflow).
+you> run nfcore_rnaseq on the samplesheet
+assistant> Submitted nfcore_rnaseq as job abc123 (engine: nextflow).
 ```
 
 ---
@@ -171,12 +177,11 @@ assistant> Submitted seqtk_galaxy as job abc123 (engine: galaxy).
 
 ## Wrapping native workflow engines
 
-The examples above show single-tool specs. You can also wrap an **existing
-workflow** (a local Snakefile, an nf-core pipeline, or a planemo/Galaxy tool)
-by authoring a toolspec whose `command` field invokes the native engine.
-There is no separate "workflow file" field — the `command` field *is* the
-wrapper. Inputs and outputs declared on the spec are used for staging,
-provenance, and crystallize channel wiring, just like any other spec.
+Sections 2 and 3 show concrete examples of wrapping nf-core and planemo/Galaxy
+tools. The same pattern works for any existing workflow — a local Snakefile, a
+WDL pipeline, or a custom Nextflow workflow. The `command` field *is* the
+wrapper: it invokes the native engine, and BioLedger stages inputs, records
+provenance, and wires crystallize channels around it.
 
 ### Local Snakefile
 
@@ -203,48 +208,6 @@ as config values, pass them via Jinja:
 ```yaml
   command: >-
     snakemake -s Snakefile --config input_bam={{inputs.input_bam}} --outdir {{outputs._dir}}
-```
-
-### nf-core workflow
-
-```yaml
-execution:
-  name: rnaseq_pipeline
-  executors: [nextflow]
-  command: >-
-    nextflow run nf-core/rnaseq -r 3.14.0
-    --input {{inputs.samplesheet}}
-    --outdir {{outputs._dir}}
-  inputs:
-    samplesheet:
-      type: file
-      format: csv
-      required: true
-```
-
-Note: for **discovered** nf-core modules, `submit_discovered` handles the
-wrapping automatically (see [Tool discovery](../tool_discovery/)). This
-example is for wrapping a whole nf-core *pipeline* by hand.
-
-### planemo/Galaxy tool
-
-```yaml
-execution:
-  name: my_galaxy_tool
-  executors: [galaxy]
-  command: >-
-    planemo run {{inputs.tool_xml}}
-    --input {{inputs.input_dataset}}
-    --output {{outputs._dir}}/out.bam
-  inputs:
-    tool_xml:
-      type: file
-      format: xml
-      required: true
-      description: "Galaxy tool XML wrapper"
-    input_dataset:
-      type: file
-      required: true
 ```
 
 ### Snakemake discovery asymmetry
