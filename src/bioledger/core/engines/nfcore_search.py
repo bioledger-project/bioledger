@@ -101,6 +101,9 @@ def download_module(
 ) -> Path:
     """Download an nf-core module's main.nf and meta.yml to cache dir.
 
+    .. deprecated:: Use :func:`install_nfcore_module` instead, which uses
+       ``nf-core modules install`` for dependency-aware installation.
+
     Returns path to the downloaded module directory.
     """
     import httpx
@@ -119,6 +122,164 @@ def download_module(
             logger.warning("Failed to download %s: %s", fname, e)
 
     return dest
+
+
+def install_nfcore_module(
+    subdirectory: str,
+    dest_dir: Path,
+    revision: str | None = None,
+) -> tuple[Path, str]:
+    """Install an nf-core module using ``nf-core modules install``.
+
+    Creates a minimal ``.nf-core.yml`` in ``dest_dir`` to suppress interactive
+    prompts, then runs ``nf-core modules install <subdir> --dir <dest_dir>
+    --force``. If ``revision`` is provided, adds ``--sha <revision>``.
+
+    Args:
+        subdirectory: Module path (e.g. "align/bowtie2/align").
+        dest_dir: Directory to install into (created if needed).
+        revision: Optional git SHA or tag to pin.
+
+    Returns:
+        Tuple of (module_dir, resolved_sha). ``module_dir`` is the path to
+        the installed module's directory. ``resolved_sha`` is the SHA from
+        ``modules.json`` after installation.
+    """
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create minimal .nf-core.yml to avoid interactive prompts
+    nfcore_yml = dest_dir / ".nf-core.yml"
+    if not nfcore_yml.exists():
+        nfcore_yml.write_text("repository_type: modules\n")
+
+    # Build the install command
+    nf_core_bin = _shutil.which("nf-core") or "nf-core"
+    cmd = [
+        nf_core_bin, "modules", "install",
+        subdirectory,
+        "--dir", str(dest_dir),
+        "--force",
+    ]
+    if revision:
+        cmd.extend(["--sha", revision])
+
+    result = _subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"nf-core modules install failed for {subdirectory}: "
+            f"{result.stderr or result.stdout}"
+        )
+
+    # Read modules.json to get the resolved SHA
+    modules_json_path = dest_dir / "modules.json"
+    resolved_sha = ""
+    if modules_json_path.exists():
+        try:
+            modules_data = _json.loads(modules_json_path.read_text())
+            repos = modules_data.get("repos", {})
+            nfcore_repo = repos.get("nf-core/modules", {})
+            modules = nfcore_repo.get("modules", {})
+            # The subdirectory in modules.json is relative to modules/nf-core/
+            # e.g. "align/bowtie2/align"
+            module_entry = modules.get(subdirectory, {})
+            resolved_sha = module_entry.get("git_sha", "")
+        except Exception as e:
+            logger.warning("Failed to read modules.json: %s", e)
+
+    # The module files are installed under modules/nf-core/<subdirectory>/
+    module_dir = dest_dir / "modules" / "nf-core" / subdirectory
+    if not module_dir.exists():
+        # Fallback: try to find the module directory
+        logger.warning(
+            "Expected module dir %s not found, searching...", module_dir,
+        )
+        for p in dest_dir.rglob("main.nf"):
+            if subdirectory.split("/")[-1] in str(p):
+                module_dir = p.parent
+                break
+
+    return module_dir, resolved_sha
+
+
+def generate_nfcore_wrapper(
+    module_subdir: str,
+    module_dir: Path,
+    meta: dict,
+    entry_id: str,
+) -> str:
+    """Generate a wrapper main.nf for an nf-core module.
+
+    The wrapper includes the module process, creates channels from params,
+    and sets ``publishDir`` to ``params.outdir`` so outputs land in the
+    work directory.
+
+    Args:
+        module_subdir: The nf-core subdirectory (e.g. "align/bowtie2/align").
+        module_dir: Path to the installed module directory.
+        meta: Parsed meta.yml dict (from ``parse_meta_yml``).
+        entry_id: The ledger entry ID, used for the include path.
+
+    Returns:
+        The wrapper main.nf content as a string.
+    """
+    module_name = module_subdir.split("/")[-1]
+    input_names = meta.get("inputs", [])
+    output_names = list(meta.get("outputs", {}).keys())
+
+    # Build include directive — relative to ${projectDir}/<entry_id>/
+    # The module files are in companion_files under the entry's namespace
+    include_path = f"modules/nf-core/{module_subdir}/main"
+
+    # Build channel declarations
+    channel_lines = []
+    for name in input_names:
+        channel_lines.append(
+            f"    {name}_ch = Channel.fromPath(params.{name})"
+        )
+    if not input_names:
+        channel_lines.append("    input_ch = Channel.fromPath(params.input)")
+
+    inputs_str = ", ".join(f"{name}_ch" for name in input_names) or "input_ch"
+
+    # Build publishDir for outputs
+    publish_lines = []
+    for out_name in output_names:
+        publish_lines.append(
+            "    publishDir params.outdir, mode: 'copy'"
+        )
+        break  # One publishDir is enough for all outputs
+
+    lines = [
+        f"// Auto-generated wrapper for nf-core module {module_subdir}",
+        f"// Entry ID: {entry_id}",
+        "",
+        f"include {{ {module_name} }} from './{include_path}'",
+        "",
+    ]
+
+    if publish_lines:
+        lines.extend(publish_lines)
+        lines.append("")
+
+    lines.extend([
+        "workflow {",
+        *channel_lines,
+        f"    {module_name}({inputs_str})",
+        "}",
+        "",
+    ])
+
+    return "\n".join(lines)
 
 
 def parse_meta_yml(module_dir: Path) -> dict:

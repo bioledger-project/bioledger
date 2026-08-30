@@ -77,13 +77,14 @@ def download_tool(
     repo_name: str,
     revision: str | None = None,
     dest_dir: Path | None = None,
-) -> Path:
+) -> tuple[Path, str]:
     """Download tool XML + macros.xml + scripts to cache dir.
 
     Uses ts.repositories.get_repository_revision_install_info() to get the
     file list, then downloads each file via the Tool Shed API.
 
-    Returns path to the downloaded tool directory.
+    Returns tuple of (path to downloaded tool directory, resolved changeset
+    revision).
     """
     try:
         from bioblend.toolshed import ToolShedInstance
@@ -140,7 +141,7 @@ def download_tool(
         except Exception as e:
             logger.warning("Failed to download %s: %s", file_path, e)
 
-    return dest
+    return dest, rev
 
 
 def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
@@ -170,7 +171,6 @@ def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
 
     root = tree.getroot()
     tool_id = root.get("id", root.get("name", "unknown"))
-    tool_name = root.get("name", tool_id)
     version = root.get("version", "")
 
     # Extract description
@@ -185,18 +185,10 @@ def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
                 container = req.text or ""
                 break
 
-    # Extract command
-    command_elem = root.find("command")
+    # Extract command — no longer attempts Cheetah-to-Jinja translation.
+    # The command field is set by submit_discovered() to a planemo invocation;
+    # the raw Cheetah template is not useful for direct execution.
     command = ""
-    if command_elem is not None:
-        command = (command_elem.text or "").strip()
-        # Replace Galaxy-style $param with Jinja2 {{ inputs.param }}
-        # This is a minimal transformation — not a full translator
-        for inp in root.findall(".//param"):
-            inp_name = inp.get("name", "")
-            if inp_name:
-                command = command.replace(f"${inp_name}", f"{{{{ inputs.{inp_name} }}}}")
-                command = command.replace(f"$__param_{inp_name}", f"{{{{ inputs.{inp_name} }}}}")
 
     # Extract inputs from <inputs><param> elements
     inputs: dict[str, ToolInput] = {}
@@ -225,7 +217,9 @@ def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
             if not out_name:
                 continue
             out_format = data.get("format", "any")
-            out_pattern = data.get("from_work_dir", data.get("label", ""))
+            # Only use from_work_dir as pattern — label is human-readable
+            # text, not a valid filesystem glob.
+            out_pattern = data.get("from_work_dir", "")
             outputs[out_name] = ToolOutput(
                 name=out_name,
                 type=ParamType.FILE,
@@ -233,13 +227,8 @@ def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
                 pattern=out_pattern,
             )
 
-    # Build default command if none was extracted
-    if not command:
-        if inputs:
-            first_input = list(inputs.keys())[0]
-            command = f"{tool_name} {{{{ inputs.{first_input} }}}}"
-        else:
-            command = tool_name
+    # command is left empty — submit_discovered() sets it to the planemo
+    # invocation. The raw Cheetah template is not portable to Jinja2.
 
     return ExecutionSpec(
         name=tool_id,

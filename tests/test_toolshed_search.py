@@ -81,10 +81,37 @@ class TestDownloadTool:
             mock_resp.status_code = 200
             mock_resp.content = b"<tool id='test'/>"
             mock_get.return_value = mock_resp
-            dest = download_tool("devteam", "bowtie2", dest_dir=tmp_path)
+            dest, rev = download_tool("devteam", "bowtie2", dest_dir=tmp_path)
         assert dest.exists()
         assert dest == tmp_path
+        assert rev == "abc123"
         assert mock_get.call_count == 2
+
+    def test_download_tool_with_pinned_revision(self, tmp_path):
+        """download_tool() with revision should use it directly."""
+        mock_module, mock_toolshed, mock_ts_cls = _mock_bioblend()
+        mock_ts = MagicMock()
+        mock_ts_cls.return_value = mock_ts
+        mock_ts.repositories.get_repository_revision_install_info.return_value = [
+            {"file_path": "bowtie2.xml"},
+        ]
+        with (
+            patch.dict(sys.modules, {"bioblend": mock_module, "bioblend.toolshed": mock_toolshed}),
+            patch("httpx.get") as mock_get,
+        ):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.content = b"<tool id='test'/>"
+            mock_get.return_value = mock_resp
+            dest, rev = download_tool(
+                "devteam", "bowtie2",
+                revision="def456",
+                dest_dir=tmp_path,
+            )
+        assert dest.exists()
+        assert rev == "def456"
+        # Should not call show_repository when revision is given
+        mock_ts.repositories.show_repository.assert_not_called()
 
 
 class TestParseToolToSpec:
@@ -102,7 +129,7 @@ class TestParseToolToSpec:
     <param name="reads" type="data" format="fastq" />
   </inputs>
   <outputs>
-    <data name="output" format="sam" />
+    <data name="output" format="sam" from_work_dir="output.sam" />
   </outputs>
 </tool>
 """
@@ -120,7 +147,11 @@ class TestParseToolToSpec:
         assert spec.inputs["reads"].format == "fastq"
         assert "output" in spec.outputs
         assert spec.outputs["output"].format == "sam"
+        assert spec.outputs["output"].pattern == "output.sam"
         assert "galaxy" in spec.executors
+        # Command is no longer extracted from Cheetah — left empty for
+        # submit_discovered() to set the planemo invocation.
+        assert spec.command == ""
 
     def test_parse_no_xml_raises(self, tmp_path):
         """parse_tool_to_spec() should raise FileNotFoundError if no XML."""
@@ -139,6 +170,27 @@ class TestParseToolToSpec:
 
         spec = parse_tool_to_spec(tmp_path)
         assert spec.name == "simple"
-        assert spec.command == "echo hello"
+        assert spec.command == ""
         assert spec.inputs == {}
         assert spec.outputs == {}
+
+    def test_parse_output_pattern_from_work_dir_only(self, tmp_path):
+        """parse_tool_to_spec() should use from_work_dir, not label, for pattern."""
+        xml_content = """\
+<tool id="test" name="Test" version="1.0">
+  <inputs>
+    <param name="input1" type="data" format="txt" />
+  </inputs>
+  <outputs>
+    <data name="out1" format="txt" from_work_dir="results.txt" label="Human Readable Label" />
+    <data name="out2" format="txt" label="Another Label" />
+  </outputs>
+</tool>
+"""
+        xml_path = tmp_path / "test.xml"
+        xml_path.write_text(xml_content)
+
+        spec = parse_tool_to_spec(tmp_path)
+        assert spec.outputs["out1"].pattern == "results.txt"
+        # out2 has no from_work_dir — pattern should be empty, not the label
+        assert spec.outputs["out2"].pattern == ""

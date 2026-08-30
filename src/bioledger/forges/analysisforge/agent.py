@@ -1055,12 +1055,13 @@ class AnalysisForgeAgent:
     ) -> tuple[LedgerEntry, Any]:
         """Submit a discovered tool (from Tool Shed or nf-core) for execution.
 
-        Downloads the tool, parses it into an ExecutionSpec, then dispatches
-        to the appropriate engine adapter via submit_spec().
+        Downloads the tool, parses it into an ExecutionSpec, sets a truthful
+        command, then dispatches to the appropriate engine adapter via
+        submit_spec().
 
         discovered_source format:
-          - 'toolshed:<owner>/<repo>' — Galaxy Tool Shed
-          - 'nfcore:<subdirectory>' — nf-core modules
+          - 'toolshed:<owner>/<repo>[@<revision>]' — Galaxy Tool Shed
+          - 'nfcore:<subdirectory>[@<revision>]' — nf-core modules
         """
         from bioledger.core.engines.dispatch import _get_engine_adapter
         from bioledger.forges.analysisforge.executor import get_session_dir
@@ -1069,9 +1070,27 @@ class AnalysisForgeAgent:
             self.config.home_dir, self.session.id
         )
 
-        # Parse the source string
+        companion_files: dict[str, str] = {}
+        discovered_revision = ""
+
+        # Parse the source string — supports @<revision> pinning syntax
+        # e.g. "nfcore:align/bowtie2@abc123" or "toolshed:devteam/bowtie2@abc123"
+        source_body = (
+            discovered_source.split(":", 1)[1]
+            if ":" in discovered_source
+            else discovered_source
+        )
+        pinned_revision: str | None = None
+        if "@" in source_body:
+            source_body, pinned_revision = source_body.rsplit("@", 1)
+
         if discovered_source.startswith("toolshed:"):
-            repo = discovered_source[len("toolshed:"):]
+            repo = source_body
+            if "/" not in repo:
+                raise ValueError(
+                    f"Invalid toolshed source '{discovered_source}' — "
+                    "expected format: toolshed:<owner>/<repo>[@<revision>]"
+                )
             owner, repo_name = repo.split("/", 1)
             from bioledger.core.engines.toolshed_search import (
                 download_tool,
@@ -1079,19 +1098,55 @@ class AnalysisForgeAgent:
             )
 
             work_dir = session_dir / f"discovered_{owner}_{repo_name}"
-            tool_dir = download_tool(owner, repo_name, dest_dir=work_dir / "tool")
+            tool_dir, resolved_rev = download_tool(
+                owner, repo_name,
+                revision=pinned_revision,
+                dest_dir=work_dir / "tool",
+            )
+            discovered_revision = resolved_rev
             spec = parse_tool_to_spec(tool_dir)
             engine = "galaxy"
+
+            # Set truthful command: planemo run with heredoc job.yml
+            input_names = list(spec.inputs.keys())
+            job_yml_lines = ["cat > job.yml <<'EOF'"]
+            for name in input_names:
+                job_yml_lines.append(f"{name}:")
+                job_yml_lines.append("  class: File")
+                job_yml_lines.append(f"  path: {{{{ inputs.{name} }}}}")
+            job_yml_lines.append("EOF")
+            job_yml_heredoc = "\n".join(job_yml_lines)
+            # Use __ENTRY_ID__ placeholder — replaced after entry creation
+            spec.command = (
+                f"{job_yml_heredoc}\n"
+                "planemo run ${projectDir}/__ENTRY_ID__/tool.xml "
+                "job.yml --outdir {{ outputs._dir }}"
+            )
+
+            # Populate companion_files with all XML files from tool_dir
+            for f in tool_dir.glob("*.xml"):
+                companion_files[f.name] = str(f)
+
+            # Apply tool_name override
+            if tool_name:
+                spec.name = tool_name
+
         elif discovered_source.startswith("nfcore:"):
-            subdir = discovered_source[len("nfcore:"):]
+            subdir = source_body
             from bioledger.core.engines.nfcore_search import (
-                download_module,
+                install_nfcore_module,
                 parse_meta_yml,
+                generate_nfcore_wrapper,
             )
 
             work_dir = session_dir / f"discovered_nfcore_{subdir.replace('/', '_')}"
-            module_dir = download_module(subdir, dest_dir=work_dir / "module")
+            module_dir, resolved_sha = install_nfcore_module(
+                subdir, dest_dir=work_dir / "module",
+                revision=pinned_revision,
+            )
+            discovered_revision = resolved_sha
             meta = parse_meta_yml(module_dir)
+
             # Build a minimal ExecutionSpec from meta.yml data
             from bioledger.toolspec.models import (
                 ExecutionSpec,
@@ -1099,7 +1154,8 @@ class AnalysisForgeAgent:
                 ToolInput,
                 ToolOutput,
             )
-            tool_name = subdir.replace("/", "_")
+
+            derived_name = subdir.replace("/", "_")
             inputs = {
                 name: ToolInput(name=name, type=ParamType.FILE, format="any")
                 for name in meta["inputs"]
@@ -1111,20 +1167,39 @@ class AnalysisForgeAgent:
                 )
                 for name, pattern in meta["outputs"].items()
             }
-            first_input = meta["inputs"][0] if meta["inputs"] else "input"
             spec = ExecutionSpec(
-                name=tool_name,
+                name=tool_name or derived_name,
                 version="",
                 description="",
                 container=meta["container"],
-                command=f"// nf-core module — include from modules/{subdir}/main.nf\n"
-                        f"// This process is a wrapper; the actual logic is in the module file.\n"
-                        f"// Input: {{{{inputs.{first_input}}}}}",
+                command="",  # Set below after entry creation
                 inputs=inputs,
                 outputs=outputs,
                 executors=["nextflow"],
             )
             engine = "nextflow"
+
+            # Generate wrapper main.nf content
+            # We need the entry.id for the wrapper, but it's created below.
+            # Use a placeholder that we'll replace after entry creation.
+            wrapper_content = generate_nfcore_wrapper(
+                subdir, module_dir, meta, "__ENTRY_ID__",
+            )
+            wrapper_path = work_dir / "module" / "wrapper_main.nf"
+            wrapper_path.write_text(wrapper_content)
+
+            # Populate companion_files with wrapper + full module tree
+            companion_files["wrapper_main.nf"] = str(wrapper_path)
+            for f in module_dir.rglob("*"):
+                if f.is_file():
+                    rel = f.relative_to(work_dir / "module")
+                    companion_files[str(rel)] = str(f)
+            # Also include .nf-core.yml and modules.json
+            for fname in (".nf-core.yml", "modules.json"):
+                fpath = work_dir / "module" / fname
+                if fpath.exists():
+                    companion_files[fname] = str(fpath)
+
         else:
             raise ValueError(
                 f"Unknown discovered_source format: {discovered_source}"
@@ -1149,22 +1224,40 @@ class AnalysisForgeAgent:
             run_status="running",
             run_handle_id="",
             executor=engine,
+            companion_files=companion_files,
+            discovered_source=discovered_source,
+            discovered_revision=discovered_revision,
             notes=f"Discovered tool from {discovered_source}",
         )
         self.session.add(entry)
 
-        # Submit via submit_spec()
+        # Now that we have entry.id, fix the command placeholder
+        if engine == "galaxy":
+            spec.command = spec.command.replace("__ENTRY_ID__", entry.id)
+        elif engine == "nextflow":
+            # Set the command with the real entry.id
+            input_args = " ".join(
+                f"--{name} {{{{ inputs.{name} }}}}" for name in spec.inputs
+            )
+            spec.command = (
+                f"nextflow run ${{projectDir}}/{entry.id}/wrapper_main.nf "
+                f"{input_args} --outdir {{{{ outputs._dir }}}}"
+            )
+            # Update the snapshot with the real command
+            entry.tool_spec_snapshot = spec.model_dump()
+            # Also fix the wrapper main.nf with the real entry_id
+            wrapper_path = work_dir / "module" / "wrapper_main.nf"
+            if wrapper_path.exists():
+                content = wrapper_path.read_text()
+                wrapper_path.write_text(content.replace("__ENTRY_ID__", entry.id))
+
+        # Submit via submit_spec() — no more tool_dir/module_dir kwargs
         submit_kwargs: dict[str, Any] = {
             "spec": spec,
             "input_mapping": input_mapping,
             "params": params,
             "work_dir": work_dir / f"run_{entry.id}",
         }
-        # Pass tool_dir for Galaxy (Tool Shed) discovered tools
-        if engine == "galaxy":
-            submit_kwargs["tool_dir"] = tool_dir
-        elif engine == "nextflow":
-            submit_kwargs["module_dir"] = module_dir
         run_handle = adapter.submit_spec(**submit_kwargs)
 
         # Write engine metadata sidecar for poll/collect reconstruction

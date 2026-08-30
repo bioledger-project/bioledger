@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from bioledger.core.engines.nfcore_search import (
     NFCoreResult,
     download_module,
+    generate_nfcore_wrapper,
     parse_meta_yml,
     search_nfcore,
 )
@@ -71,3 +73,41 @@ class TestDownloadModule:
         assert dest.exists()
         assert (dest / "main.nf").exists()
         assert (dest / "meta.yml").exists()
+
+
+class TestGenerateNfcoreWrapper:
+    def test_wrapper_includes_module_and_channels(self, tmp_path):
+        """generate_nfcore_wrapper() should produce a valid Nextflow wrapper."""
+        meta = {
+            "inputs": ["reads", "index"],
+            "outputs": {"bam": "*.bam"},
+            "container": "quay.io/biocontainers/bowtie2:2.5.0",
+        }
+        wrapper = generate_nfcore_wrapper(
+            "align/bowtie2/bowtie2_align",
+            tmp_path,
+            meta,
+            "test_entry_001",
+        )
+        assert "include" in wrapper
+        assert "bowtie2_align" in wrapper
+        assert "reads_ch" in wrapper
+        assert "index_ch" in wrapper
+        assert "workflow {" in wrapper
+        assert "publishDir" in wrapper
+
+    def test_wrapper_no_inputs_uses_fallback_channel(self, tmp_path):
+        """generate_nfcore_wrapper() with no inputs should use input_ch."""
+        meta = {
+            "inputs": [],
+            "outputs": {"out": "*.out"},
+            "container": "",
+        }
+        wrapper = generate_nfcore_wrapper(
+            "utils/sometool",
+            tmp_path,
+            meta,
+            "test_entry_002",
+        )
+        assert "input_ch" in wrapper
+        assert "sometool" in wrapper
