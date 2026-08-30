@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from bioledger.core.engines.config import GalaxyEngineConfig
 from bioledger.core.engines.dispatch import _adapter_registry, dispatch
 from bioledger.core.engines.galaxy_adapter import GalaxyAdapter
@@ -53,8 +55,6 @@ class TestGalaxyGenerate:
 
     def test_generate_raises_deferred(self):
         """GalaxyAdapter.generate() raises NotImplementedError for fan-out."""
-        import pytest
-
         adapter = GalaxyAdapter()
         spec = _MockSpec()
         with pytest.raises(NotImplementedError, match="Galaxy fan-out"):
@@ -281,57 +281,45 @@ class TestGalaxyDispatch:
 
 
 class TestGalaxySubmitSpec:
-    def test_submit_spec_delegates_to_generate_and_submit(self, tmp_path):
-        """submit_spec() with tool_dir should call generate() then submit()."""
+    def test_submit_spec_renders_command_and_returns_runhandle(self, tmp_path):
+        """submit_spec() should Jinja-render spec.command and launch as subprocess."""
         adapter = GalaxyAdapter()
-        spec = _MockSpec()
-        mock_handle = MagicMock()
-        mock_run_handle = RunHandle(
-            executor="galaxy",
-            run_id="inv-123",
-            entry_id="",
-            work_dir=tmp_path,
+        spec = _MockSpec(
+            command=(
+                "planemo run tool.xml job.yml "
+                "--input {{ inputs.input }} "
+                "--outdir {{ outputs._dir }}"
+            ),
         )
         with (
-            patch.object(adapter, "generate", return_value=mock_handle) as mock_gen,
-            patch.object(adapter, "submit", return_value=mock_run_handle) as mock_sub,
+            patch.object(adapter, "_detect_version", return_value="2.16.0"),
+            patch("subprocess.Popen") as mock_popen,
         ):
-            result = adapter.submit_spec(
+            mock_proc = mock_popen.return_value
+            mock_proc.pid = 12345
+            handle = adapter.submit_spec(
                 spec=spec,
                 input_mapping={"input": "/data/file.bam"},
                 params={"threads": "4"},
                 work_dir=tmp_path,
-                tool_dir=tmp_path / "tool",
             )
-        mock_gen.assert_called_once_with(spec, {"input": "/data/file.bam"})
-        mock_sub.assert_called_once_with(
-            mock_handle, {"input": "/data/file.bam"}, {"threads": "4"}, tmp_path
-        )
-        assert result == mock_run_handle
+        assert handle.executor == "galaxy"
+        assert handle.run_id == "12345"
+        assert handle.status == "running"
+        mock_popen.assert_called_once()
+        cmd_args = mock_popen.call_args[0][0]
+        rendered = " ".join(cmd_args)
+        assert "/data/file.bam" in rendered
+        assert str(tmp_path) in rendered
 
-    def test_submit_spec_passes_tool_dir_to_metadata(self, tmp_path):
-        """submit_spec() with tool_dir should set it in handle metadata."""
+    def test_submit_spec_no_command_raises(self, tmp_path):
+        """submit_spec() should raise if spec has no command."""
         adapter = GalaxyAdapter()
-        spec = _MockSpec()
-        mock_handle = MagicMock()
-        mock_handle.metadata = {}
-        mock_run_handle = RunHandle(
-            executor="galaxy",
-            run_id="inv-456",
-            entry_id="",
-            work_dir=tmp_path,
-        )
-        tool_dir = tmp_path / "downloaded_tool"
-        tool_dir.mkdir()
-        with (
-            patch.object(adapter, "generate", return_value=mock_handle),
-            patch.object(adapter, "submit", return_value=mock_run_handle),
-        ):
+        spec = _MockSpec(command="")
+        with pytest.raises(RuntimeError, match="no command field"):
             adapter.submit_spec(
                 spec=spec,
                 input_mapping={"input": "/data/file.bam"},
-                params={"threads": "4"},
+                params={},
                 work_dir=tmp_path,
-                tool_dir=tool_dir,
             )
-        assert mock_handle.metadata["tool_dir"] == str(tool_dir)

@@ -6,6 +6,8 @@ import json
 import os
 from unittest.mock import patch
 
+import pytest
+
 from bioledger.core.engines.dispatch import _adapter_registry, dispatch
 from bioledger.core.engines.protocol import RunHandle
 from bioledger.core.engines.snakemake_adapter import (
@@ -254,14 +256,23 @@ class TestDispatchWithSnakemake:
 
 
 class TestSnakemakeSubmitSpec:
-    def test_submit_spec_generates_snakefile_and_returns_runhandle(self, tmp_path):
-        """submit_spec() should generate Snakefile and return RunHandle."""
+    def test_submit_spec_renders_command_and_returns_runhandle(self, tmp_path):
+        """submit_spec() should Jinja-render spec.command and launch as subprocess."""
         adapter = SnakemakeAdapter()
         spec = _MockSpec(
+            command=(
+                "snakemake -s Snakefile --configfile config.yaml "
+                "--input {{ inputs.input }} --threads {{ parameters.threads }} "
+                "--outdir {{ outputs._dir }}"
+            ),
             inputs={"input": _MockInput("input", collection=False)},
         )
         with (
-            patch.object(type(adapter), "executable", new_callable=lambda: "snakemake"),
+            patch.object(
+                type(adapter), "executable",
+                new_callable=lambda: "snakemake",
+            ),
+            patch.object(adapter, "_detect_version", return_value="7.32.4"),
             patch("subprocess.Popen") as mock_popen,
         ):
             mock_proc = mock_popen.return_value
@@ -275,12 +286,20 @@ class TestSnakemakeSubmitSpec:
         assert handle.executor == "snakemake"
         assert handle.run_id == "12345"
         assert handle.status == "running"
-        # Verify Snakefile was written
-        snakefile_path = tmp_path / "Snakefile"
-        assert snakefile_path.exists()
-        content = snakefile_path.read_text()
-        assert "rule samtools_sort" in content
-        assert "rule all" in content
-        # Verify config.yaml was written
-        config_path = tmp_path / "config.yaml"
-        assert config_path.exists()
+        mock_popen.assert_called_once()
+        cmd_args = mock_popen.call_args[0][0]
+        rendered = " ".join(cmd_args)
+        assert "/data/file.bam" in rendered
+        assert str(tmp_path) in rendered
+
+    def test_submit_spec_no_command_raises(self, tmp_path):
+        """submit_spec() should raise if spec has no command."""
+        adapter = SnakemakeAdapter()
+        spec = _MockSpec(command="")
+        with pytest.raises(RuntimeError, match="no command field"):
+            adapter.submit_spec(
+                spec=spec,
+                input_mapping={"input": "/data/file.bam"},
+                params={},
+                work_dir=tmp_path,
+            )

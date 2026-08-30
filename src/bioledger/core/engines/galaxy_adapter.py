@@ -32,7 +32,6 @@ from bioledger.core.engines.protocol import (
     RunHandle,
     RunStatus,
     WorkflowHandle,
-    build_output_patterns,
     split_collection_inputs,
 )
 
@@ -249,79 +248,30 @@ class GalaxyAdapter:
         input_mapping: dict[str, str],
         params: dict[str, Any],
         work_dir: Path,
-        tool_dir: Path | None = None,
     ) -> RunHandle:
         """Run a single workflow toolspec via Galaxy.
 
-        If ``tool_dir`` is provided (discovered Tool Shed XML), delegates to
-        ``generate()`` + ``submit()``: the ``generate()`` method builds a
-        ``.ga`` workflow from the spec, and ``submit()`` invokes it on the
-        Galaxy instance (planemo or remote).
-
-        If ``tool_dir`` is NOT provided (user-defined spec), runs the spec's
-        ``command`` field directly as a subprocess — the command must be a
-        valid Galaxy/planemo invocation (e.g. ``planemo run tool.xml ...``).
-        Bypasses ``.ga`` workflow generation and bioblend entirely.
+        Jinja-renders ``spec.command`` with real input paths and parameter
+        values, then launches the rendered command as a subprocess. The
+        command is expected to be a valid ``planemo run ...`` invocation.
         """
-        if tool_dir:
-            handle = self.generate(spec, input_mapping)
-            handle.metadata["tool_dir"] = str(tool_dir)
-            return self.submit(handle, input_mapping, params, work_dir)
+        from bioledger.core.engines._subprocess import render_and_launch
 
-        # User-defined spec: run the command directly as a subprocess
-        work_dir = Path(work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        from bioledger.toolspec import get_jinja_env
-
-        command_template = spec.command if hasattr(spec, "command") else ""
+        command_template = getattr(spec, "command", "")
         if not command_template:
             raise RuntimeError(
-                "User-defined Galaxy spec has no command field — cannot "
-                "run directly. Provide a valid Galaxy/planemo invocation "
-                "in the command field, or use a discovered tool with tool_dir."
+                "Galaxy spec has no command field — cannot run directly. "
+                "Provide a valid 'planemo run ...' invocation in the command field."
             )
 
-        context = {
-            "inputs": {name: f"${{{name}}}" for name in input_mapping},
-            "outputs": {"_dir": str(work_dir)},
-            "parameters": params,
-        }
-        try:
-            rendered_cmd = get_jinja_env().from_string(command_template).render(context)
-        except Exception as e:
-            raise RuntimeError(f"Failed to render Galaxy command: {e}") from e
-
-        log_path = work_dir / "galaxy.log"
-        log_file = open(log_path, "w")
-        try:
-            import shlex
-            proc = subprocess.Popen(
-                shlex.split(rendered_cmd),
-                cwd=str(work_dir),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        finally:
-            log_file.close()
-
-        run_id = str(proc.pid)
-        process_start_time = None
-        try:
-            import psutil
-            process_start_time = psutil.Process(proc.pid).create_time()
-        except Exception:
-            pass
-
-        return RunHandle(
-            executor="galaxy",
-            run_id=run_id,
-            entry_id="",
+        return render_and_launch(
+            command_template=command_template,
+            input_mapping=input_mapping,
+            params=params,
             work_dir=work_dir,
-            status="running",
-            process_start_time=process_start_time,
-            metadata={"engine_version": self._detect_version()},
+            executor_name="galaxy",
+            engine_version=self._detect_version(),
+            log_filename="galaxy.log",
         )
 
     def generate(
@@ -338,28 +288,11 @@ class GalaxyAdapter:
         Shed discovery via ``submit_spec()``.
         """
         raise NotImplementedError(
-            "Galaxy fan-out is not yet supported. Fan-out requires Snakemake or Nextflow. "
-            "Install one with: pip install bioledger[snakemake] or pip install bioledger[nextflow]. "
-            "Galaxy is supported for single-tool runs and Tool Shed discovery."
-        )
-
-        step_names, collection_inputs = _generate_galaxy_workflow(
-            spec, input_mapping, artifact_path
-        )
-
-        output_patterns = build_output_patterns(spec)
-
-        return WorkflowHandle(
-            executor="galaxy",
-            artifact_path=artifact_path,
-            step_inventory=step_names,
-            container_image="",
-            input_mapping=input_mapping,
-            output_patterns=output_patterns,
-            metadata={
-                "extra_args": extra_args or [],
-                "collection_inputs": collection_inputs,
-            },
+            "Galaxy fan-out is not yet supported. Fan-out requires "
+            "Snakemake or Nextflow. Install one with: "
+            "pip install bioledger[snakemake] or "
+            "pip install bioledger[nextflow]. Galaxy is supported for "
+            "single-tool runs and Tool Shed discovery."
         )
 
     def submit(

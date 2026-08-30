@@ -52,7 +52,8 @@ class TestEngineMetadataSidecar:
         meta = _read_engine_metadata_sidecar(tmp_path, "nonexistent")
         assert meta is None
 
-    def test_sidecar_with_tool_dir(self, tmp_path):
+    def test_sidecar_no_module_or_tool_dir(self, tmp_path):
+        """Sidecar no longer stores module_dir/tool_dir — companion_files on entry instead."""
         from bioledger.forges.analysisforge.agent import (
             _read_engine_metadata_sidecar,
             _write_engine_metadata_sidecar,
@@ -69,37 +70,13 @@ class TestEngineMetadataSidecar:
 
         _write_engine_metadata_sidecar(
             tmp_path, "entry_2", run_handle,
-            tool_dir=tmp_path / "tool_xml",
         )
 
         meta = _read_engine_metadata_sidecar(tmp_path, "entry_2")
         assert meta is not None
         assert meta["planemo_pid"] == 42
-        assert meta["tool_dir"] == str(tmp_path / "tool_xml")
-
-    def test_sidecar_with_module_dir(self, tmp_path):
-        from bioledger.forges.analysisforge.agent import (
-            _read_engine_metadata_sidecar,
-            _write_engine_metadata_sidecar,
-        )
-
-        run_handle = MagicMock()
-        run_handle.work_dir = tmp_path / "work"
-        run_handle.run_id = "77"
-        run_handle.executor = "nextflow"
-        run_handle.submitted_at = "2024-01-01T00:00:00Z"
-        run_handle.status = "running"
-        run_handle.process_start_time = None
-        run_handle.metadata = {}
-
-        _write_engine_metadata_sidecar(
-            tmp_path, "entry_3", run_handle,
-            module_dir=tmp_path / "nf_module",
-        )
-
-        meta = _read_engine_metadata_sidecar(tmp_path, "entry_3")
-        assert meta is not None
-        assert meta["module_dir"] == str(tmp_path / "nf_module")
+        assert "tool_dir" not in meta
+        assert "module_dir" not in meta
 
 
 class TestParseMetaYml:

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from bioledger.core.engines.dispatch import _adapter_registry, dispatch
 from bioledger.core.engines.nextflow_adapter import (
     NextflowAdapter,
@@ -356,15 +358,19 @@ class TestNextflowDispatch:
 
 
 class TestNextflowSubmitSpec:
-    def test_submit_spec_generates_workflow_and_returns_runhandle(self, tmp_path):
-        """submit_spec() should generate main.nf with workflow block and return RunHandle."""
+    def test_submit_spec_renders_command_and_returns_runhandle(self, tmp_path):
+        """submit_spec() should Jinja-render spec.command and launch as subprocess."""
         adapter = NextflowAdapter()
         spec = _MockSpec(
+            command="nextflow run main.nf --input {{ inputs.input }} --threads {{ parameters.threads }} --outdir {{ outputs._dir }}",
             inputs={
                 "input": _MockInput("input", collection=False),
             },
         )
-        with patch("subprocess.Popen") as mock_popen:
+        with (
+            patch.object(adapter, "_detect_version", return_value="23.10.0"),
+            patch("subprocess.Popen") as mock_popen,
+        ):
             mock_proc = mock_popen.return_value
             mock_proc.pid = 12345
             handle = adapter.submit_spec(
@@ -376,48 +382,21 @@ class TestNextflowSubmitSpec:
         assert handle.executor == "nextflow"
         assert handle.run_id == "12345"
         assert handle.status == "running"
-        # Verify main.nf was written with workflow block
-        nf_path = tmp_path / "main.nf"
-        assert nf_path.exists()
-        content = nf_path.read_text()
-        assert "process samtools_sort" in content
-        assert "workflow {" in content
-        assert "samtools_sort(input_ch)" in content or "samtools_sort(" in content
-        # Verify params.json was written
-        params_path = tmp_path / "params.json"
-        assert params_path.exists()
+        # Verify the command was rendered and Popen was called
+        mock_popen.assert_called_once()
+        cmd_args = mock_popen.call_args[0][0]
+        rendered = " ".join(cmd_args)
+        assert "/data/file.bam" in rendered
+        assert str(tmp_path) in rendered
 
-    def test_submit_spec_uses_module_dir_when_provided(self, tmp_path):
-        """submit_spec() with module_dir should use the downloaded main.nf."""
+    def test_submit_spec_no_command_raises(self, tmp_path):
+        """submit_spec() should raise if spec has no command."""
         adapter = NextflowAdapter()
-        spec = _MockSpec(
-            inputs={
-                "input": _MockInput("input", collection=False),
-            },
-        )
-        # Create a fake downloaded module
-        module_dir = tmp_path / "module"
-        module_dir.mkdir()
-        (module_dir / "main.nf").write_text(
-            "process CUSTOM_PROCESS {\n"
-            "    container 'custom:latest'\n"
-            "    input:\n    path input\n"
-            "    script:\n    echo hello\n"
-            "}\n"
-        )
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = mock_popen.return_value
-            mock_proc.pid = 99999
+        spec = _MockSpec(command="")
+        with pytest.raises(RuntimeError, match="no command field"):
             adapter.submit_spec(
                 spec=spec,
                 input_mapping={"input": "/data/file.bam"},
                 params={},
-                work_dir=tmp_path / "run",
-                module_dir=module_dir,
+                work_dir=tmp_path,
             )
-        nf_path = tmp_path / "run" / "main.nf"
-        assert nf_path.exists()
-        content = nf_path.read_text()
-        # Should contain the downloaded process, not the generated one
-        assert "CUSTOM_PROCESS" in content
-        assert "process samtools_sort" not in content

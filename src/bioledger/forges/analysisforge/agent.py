@@ -42,17 +42,13 @@ def _write_engine_metadata_sidecar(
     session_dir: Path,
     entry_id: str,
     run_handle: Any,
-    module_dir: Path | None = None,
-    tool_dir: Path | None = None,
 ) -> None:
     """Write _engine_metadata_{entry_id}.json sidecar at a predictable location.
 
-    Stores all adapter-specific metadata needed for poll/collect/crystallize:
+    Stores adapter-specific metadata needed for poll/collect:
     - work_dir, run_id, executor, submitted_at, status
     - process_start_time (Snakemake/Nextflow)
     - planemo_pid (Galaxy, from run_handle.metadata)
-    - module_dir (Nextflow discovered)
-    - tool_dir (Galaxy discovered)
     """
     import json
 
@@ -72,11 +68,6 @@ def _write_engine_metadata_sidecar(
     if run_handle.metadata:
         if "planemo_pid" in run_handle.metadata:
             meta["planemo_pid"] = run_handle.metadata["planemo_pid"]
-    if module_dir:
-        meta["module_dir"] = str(module_dir)
-    if tool_dir:
-        meta["tool_dir"] = str(tool_dir)
-
     sidecar_path = session_dir / f"_engine_metadata_{entry_id}.json"
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
     sidecar_path.write_text(json.dumps(meta, indent=2))
@@ -1179,8 +1170,6 @@ class AnalysisForgeAgent:
         # Write engine metadata sidecar for poll/collect reconstruction
         _write_engine_metadata_sidecar(
             session_dir, entry.id, run_handle,
-            module_dir=module_dir if engine == "nextflow" else None,
-            tool_dir=tool_dir if engine == "galaxy" else None,
         )
 
         entry.run_handle_id = run_handle.run_id
