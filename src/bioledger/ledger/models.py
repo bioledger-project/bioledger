@@ -96,6 +96,14 @@ class LedgerEntry(BaseModel):
     # Version of the engine that ran this entry (e.g. "snakemake 7.32.4"),
     # captured at submit time. Empty for docker/conda entries and legacy
     # entries created before this field existed.
+    # Companion files needed alongside the crystallized workflow (e.g. nf-core
+    # module tree, Galaxy tool XML, generated Snakefile). Maps dest-relative-path
+    # → source-absolute-path. Namespaced by entry.id for staging.
+    companion_files: dict[str, str] = {}
+    # Discovery provenance: source prefix (e.g. "nfcore:align/bowtie2/align",
+    # "toolshed:devteam/bowtie2") and resolved revision (git SHA / tag).
+    discovered_source: str = ""
+    discovered_revision: str = ""
 
 
 class LedgerSession(BaseModel):

@@ -1052,8 +1052,13 @@ def crystallize(
     include_running: bool = typer.Option(
         False, "--include-running", help="Include jobs still running"
     ),
+    stage: Path | None = typer.Option(
+        None, "--stage", help="Write the crystallized workflow + companion files to this directory"
+    ),
 ) -> None:
     """Convert a session (or selected entries) into a reproducible Nextflow workflow."""
+    from bioledger.ledger.models import EntryKind
+
     store = LedgerStore()
     session = store.load_session(session_id)
 
@@ -1063,13 +1068,64 @@ def crystallize(
         )
 
         entries = [e for e in session.entries if e.id in set(entry_ids)]
-        console.print(to_nextflow_from_entries(
+        workflow_text = to_nextflow_from_entries(
             entries, include_running=include_running
-        ))
+        )
     else:
         from bioledger.forges.analysisforge.crystallize import to_nextflow
 
-        console.print(to_nextflow(session, include_running=include_running))
+        workflow_text = to_nextflow(session, include_running=include_running)
+
+    if stage:
+        import shutil
+
+        stage = Path(stage)
+        stage.mkdir(parents=True, exist_ok=True)
+        (stage / "main.nf").write_text(workflow_text)
+
+        # Stage companion files for entries in the workflow
+        tool_entries = [
+            e for e in session.entries
+            if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
+            and e.run_status in ("completed", "failed")
+            and (not entry_ids or e.id in set(entry_ids))
+            and e.companion_files
+        ]
+        for entry in tool_entries:
+            entry_dir = stage / entry.id
+            entry_dir.mkdir(parents=True, exist_ok=True)
+            for dest_rel, src_path in entry.companion_files.items():
+                src = Path(src_path)
+                if src.exists():
+                    dest = entry_dir / dest_rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+
+        if tool_entries:
+            console.print(
+                f"[green]Crystallized workflow written to {stage / 'main.nf'}[/green]\n"
+                f"[green]Staged companion files for {len(tool_entries)} entries[/green]"
+            )
+        else:
+            console.print(
+                f"[green]Crystallized workflow written to {stage / 'main.nf'}[/green]"
+            )
+    else:
+        # Text-only mode — warn if any entries have companion_files
+        tool_entries = [
+            e for e in session.entries
+            if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
+            and e.run_status in ("completed", "failed")
+            and (not entry_ids or e.id in set(entry_ids))
+            and e.companion_files
+        ]
+        if tool_entries:
+            console.print(
+                "[yellow]Warning: {} entries have companion files that are not "
+                "included in the text output. Use --stage <dir> to write them.[/yellow]"
+                .format(len(tool_entries))
+            )
+        console.print(workflow_text)
 
 
 # --- Package ---

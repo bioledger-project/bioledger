@@ -134,14 +134,39 @@ def _add_engine_supplementary_files(
 ) -> None:
     """Add engine-specific supplementary files to the crate.
 
-    For snakemake entries: generate .smk rule files.
-    For galaxy entries: copy tool XML from tool_dir (via _engine_metadata sidecar).
-    For nextflow entries: copy module files from module_dir (via sidecar).
+    Three-way branch:
+    (a) Snakemake fan-out entries (no companion_files) → generate .smk
+        from the spec via _generate_snakefile_from_entry() (unchanged).
+    (b) Galaxy/Nextflow/Snakemake discovered entries with companion_files →
+        stage from companion_files (new).
+    (c) Entries with neither → skip.
     """
-    import json
-
     for entry in entries:
-        if entry.executor == "snakemake":
+        if entry.companion_files:
+            # (b) companion_files-driven staging
+            for dest_rel, src_path in entry.companion_files.items():
+                src = Path(src_path)
+                if not src.exists():
+                    logger.warning(
+                        "Companion file %s not found for entry %s",
+                        src_path, entry.id,
+                    )
+                    continue
+                dest = f"{entry.id}/{dest_rel}"
+                f_path = scratch / dest
+                f_path.parent.mkdir(parents=True, exist_ok=True)
+                f_path.write_bytes(src.read_bytes())
+                crate.add_file(
+                    str(f_path),
+                    dest_path=dest,
+                    properties={
+                        "description": (
+                            f"Companion file for {entry.tool_spec_name}"
+                        ),
+                    },
+                )
+        elif entry.executor == "snakemake":
+            # (a) Snakemake fan-out — generate .smk from spec
             smk_content = _generate_snakefile_from_entry(entry)
             if smk_content:
                 tool_name = entry.tool_spec_name or "tool"
@@ -157,59 +182,6 @@ def _add_engine_supplementary_files(
                         "programmingLanguage": "snakemake",
                     },
                 )
-        elif entry.executor in ("galaxy", "nextflow"):
-            if not session_dir:
-                logger.warning(
-                    "Cannot add supplementary files for entry %s — "
-                    "session_dir not provided",
-                    entry.id,
-                )
-                continue
-            meta_path = session_dir / f"_engine_metadata_{entry.id}.json"
-            if meta_path.exists():
-                meta = json.loads(meta_path.read_text())
-                dir_key = "tool_dir" if entry.executor == "galaxy" else "module_dir"
-                src_dir = meta.get(dir_key)
-                if src_dir and Path(src_dir).exists():
-                    if entry.executor == "galaxy":
-                        glob_pattern = "*.xml"
-                    else:
-                        relevant_exts = (".nf", ".yml", ".yaml", ".md", ".conf")
-                        for f in Path(src_dir).iterdir():
-                            if not f.is_file() or f.suffix not in relevant_exts:
-                                continue
-                            dest = f"{entry.tool_spec_name}/{f.name}"
-                            f_path = scratch / dest
-                            f_path.parent.mkdir(parents=True, exist_ok=True)
-                            f_path.write_bytes(f.read_bytes())
-                            crate.add_file(
-                                str(f_path),
-                                dest_path=dest,
-                                properties={
-                                    "description": (
-                                        f"Nextflow module for {entry.tool_spec_name}"
-                                    ),
-                                },
-                            )
-                        continue
-                    for f in Path(src_dir).glob(glob_pattern):
-                        if not f.is_file():
-                            continue
-                        dest = f"{entry.tool_spec_name}/{f.name}"
-                        f_path = scratch / dest
-                        f_path.parent.mkdir(parents=True, exist_ok=True)
-                        f_path.write_bytes(f.read_bytes())
-                        crate.add_file(
-                            str(f_path),
-                            dest_path=dest,
-                            properties={
-                                "description": (
-                                    f"Galaxy tool XML for {entry.tool_spec_name}"
-                                    if entry.executor == "galaxy"
-                                    else f"Nextflow module for {entry.tool_spec_name}"
-                                ),
-                            },
-                        )
 
 
 def build_rocrate(

@@ -184,6 +184,9 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
         params_dict = {p.get("name"): p.get("default") for p in params_data}
     else:
         params_dict = {k: v.get("default") for k, v in params_data.items()}
+    # Overlay entry.params (runtime overrides) on top of spec defaults
+    if entry.params:
+        params_dict = {**params_dict, **entry.params}
     context = {
         "inputs": {name: f"${{{name}}}" for name in input_names},
         "outputs": {"_dir": "."},
