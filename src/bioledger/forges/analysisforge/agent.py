@@ -68,6 +68,7 @@ def _write_engine_metadata_sidecar(
     if run_handle.metadata:
         if "planemo_pid" in run_handle.metadata:
             meta["planemo_pid"] = run_handle.metadata["planemo_pid"]
+
     sidecar_path = session_dir / f"_engine_metadata_{entry_id}.json"
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
     sidecar_path.write_text(json.dumps(meta, indent=2))
@@ -249,9 +250,10 @@ class ToolRunRequest(BaseModel):
         default=None,
         description=(
             "Optional: if the tool was discovered via tool search, "
-            "set this to 'toolshed:<owner>/<repo>' or "
-            "'nfcore:<subdirectory>' to trigger the discovered-tool "
-            "execution path. Leave None for tools already in the local store."
+            "set this to 'toolshed:<owner>/<repo>', "
+            "'nfcore:<subdirectory>', or 'snakemake:<wrapper_path>' "
+            "to trigger the discovered-tool execution path. "
+            "Leave None for tools already in the local store."
         ),
     )
 
@@ -531,6 +533,32 @@ class AnalysisForgeAgent:
                 return "nf-core results:\n" + "\n".join(lines)
             except RuntimeError as e:
                 return f"nf-core search unavailable: {e}"
+
+        @self._chat_agent.tool
+        def search_snakemake_wrappers(
+            ctx: RunContext[ForgeDeps], query: str
+        ) -> str:
+            """Search the Snakemake wrappers repo for wrappers matching the query.
+            Use this when the user asks to find a Snakemake wrapper that is
+            not locally installed. Returns wrapper names, paths, and
+            descriptions. The user can then run a discovered wrapper by
+            setting discovered_source='snakemake:<wrapper_path>'."""
+            try:
+                from bioledger.core.engines.snakemake_search import (
+                    search_wrappers as _search,
+                )
+
+                results = _search(query)
+                if not results:
+                    return f"No Snakemake wrapper results for '{query}'."
+                lines = []
+                for r in results:
+                    lines.append(
+                        f"  {r.name} ({r.path}): {r.description}"
+                    )
+                return "Snakemake wrapper results:\n" + "\n".join(lines)
+            except RuntimeError as e:
+                return f"Snakemake wrapper search unavailable: {e}"
 
         # Tool selection agent — structured output
         self._tool_select_agent = make_agent(
@@ -1053,7 +1081,7 @@ class AnalysisForgeAgent:
         params: dict[str, Any],
         parent_id: str | None = None,
     ) -> tuple[LedgerEntry, Any]:
-        """Submit a discovered tool (from Tool Shed or nf-core) for execution.
+        """Submit a discovered tool (from Tool Shed, nf-core, or Snakemake) for execution.
 
         Downloads the tool, parses it into an ExecutionSpec, sets a truthful
         command, then dispatches to the appropriate engine adapter via
@@ -1062,6 +1090,7 @@ class AnalysisForgeAgent:
         discovered_source format:
           - 'toolshed:<owner>/<repo>[@<revision>]' — Galaxy Tool Shed
           - 'nfcore:<subdirectory>[@<revision>]' — nf-core modules
+          - 'snakemake:<wrapper_path>[@<revision>]' — Snakemake wrappers
         """
         from bioledger.core.engines.dispatch import _get_engine_adapter
         from bioledger.forges.analysisforge.executor import get_session_dir
@@ -1200,6 +1229,63 @@ class AnalysisForgeAgent:
                 if fpath.exists():
                     companion_files[fname] = str(fpath)
 
+        elif discovered_source.startswith("snakemake:"):
+            wrapper_path_str = source_body
+            from bioledger.core.engines.snakemake_search import (
+                download_wrapper,
+                parse_wrapper_to_spec,
+                generate_wrapper_snakefile,
+            )
+
+            work_dir = session_dir / (
+                f"discovered_smk_{wrapper_path_str.replace('/', '_')}"
+            )
+            wrapper_dir, resolved_rev = download_wrapper(
+                wrapper_path_str,
+                revision=pinned_revision,
+                dest_dir=work_dir / "wrapper",
+            )
+            discovered_revision = resolved_rev
+            spec = parse_wrapper_to_spec(wrapper_dir, wrapper_path_str)
+            engine = "snakemake"
+
+            # Generate a Snakefile with native wrapper: directive
+            snakefile_content = generate_wrapper_snakefile(
+                wrapper_path_str, spec,
+                revision=resolved_rev,
+            )
+            snakefile_path = work_dir / "wrapper" / "Snakefile"
+            snakefile_path.parent.mkdir(parents=True, exist_ok=True)
+            snakefile_path.write_text(snakefile_content)
+            companion_files["Snakefile"] = str(snakefile_path)
+
+            # Set command: snakemake runs the generated Snakefile
+            # Inputs and params are passed via --config so the Snakefile
+            # can reference them as config['name'] / config.get('name')
+            # Snakemake's --config takes nargs='*' (all pairs after one flag);
+            # multiple --config flags would silently discard earlier ones.
+            config_args = []
+            for name in spec.inputs:
+                config_args.append(
+                    f"{name}={{{{ inputs.{name} }}}}"
+                )
+            for name in spec.parameters:
+                config_args.append(
+                    f"{name}={{{{ parameters.{name} }}}}"
+                )
+            config_str = (
+                f"--config {' '.join(config_args)}"
+                if config_args else ""
+            )
+            spec.command = (
+                f"snakemake -s ${{projectDir}}/__ENTRY_ID__/Snakefile "
+                f"{config_str} --directory {{{{ outputs._dir }}}}"
+            )
+
+            # Apply tool_name override
+            if tool_name:
+                spec.name = tool_name
+
         else:
             raise ValueError(
                 f"Unknown discovered_source format: {discovered_source}"
@@ -1250,6 +1336,9 @@ class AnalysisForgeAgent:
             if wrapper_path.exists():
                 content = wrapper_path.read_text()
                 wrapper_path.write_text(content.replace("__ENTRY_ID__", entry.id))
+        elif engine == "snakemake":
+            spec.command = spec.command.replace("__ENTRY_ID__", entry.id)
+            entry.tool_spec_snapshot = spec.model_dump()
 
         # Submit via submit_spec() — no more tool_dir/module_dir kwargs
         submit_kwargs: dict[str, Any] = {
