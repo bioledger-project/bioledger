@@ -2,13 +2,21 @@
 
 How to author BioLedger tool specs manually — wrapping third-party tools, custom scripts, or existing workflow engine tools. These specs live in your local store and can be used in sessions, fan-out, and crystallization.
 
+> **Before you write a spec:** BioLedger can automatically discover and run tools from the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/) (any repo, any owner) and [nf-core modules](https://nf-co.re/modules) — no spec needed. Use `bioledger tool search` and the agent's `search_toolshed` / `search_nfcore` tools to find and run them directly. Hand-authored specs are for:
+> - **Individual tools** (docker/conda) — the most common case
+> - **Non-nf-core Nextflow workflows** — nf-core *modules* are auto-discoverable, but whole pipelines from other orgs (e.g. veg/CAPHEINE) are not
+> - **Pinning a specific Tool Shed revision** — auto-discovery always fetches the latest; a spec lets you pin a changeset for reproducibility
+> - **Custom/local workflows** — Snakefiles, lab-internal Galaxy tools, etc.
+>
+> See [Tool discovery](../tool_discovery/) for the auto-discovery flow.
+
 This example covers four execution backends:
 
 | Spec | Executor | What it shows |
 |------|----------|---------------|
 | `samtools_sort.bioledger.yaml` | `docker` + `conda` | Dual-executor tool — Docker auto-derives image from `conda_deps`, Conda creates native env |
-| `nfcore_rnaseq.bioledger.yaml` | `nextflow` | Wrapping an nf-core pipeline as a tool spec |
-| `seqtk_galaxy.bioledger.yaml` | `galaxy` | Wrapping a planemo/Galaxy tool as a tool spec |
+| `capheine_nextflow.bioledger.yaml` | `nextflow` | Wrapping a non-nf-core Nextflow workflow (veg/CAPHEINE) |
+| `toolshed_agat.bioledger.yaml` | `galaxy` | Pinning a specific Tool Shed revision (bgruening/agat @ 6d8be3337e2a) |
 
 ---
 
@@ -85,92 +93,92 @@ assistant> Submitted samtools_sort as job abc123 (executor: docker).
 
 ---
 
-## 2. Nextflow executor — `nfcore_rnaseq.bioledger.yaml`
+## 2. Nextflow executor — `capheine_nextflow.bioledger.yaml`
 
 Engine executors (`nextflow`, `snakemake`, `galaxy`) are for wrapping **existing
-workflows and modules** — not individual tools. If you want to run fastqc, write
-a docker/conda spec (see section 1). If you want to run an nf-core pipeline like
-`nf-core/rnaseq`, wrap it with a nextflow executor spec:
+workflows** — not individual tools. If you want to run fastqc, write a docker/conda
+spec (see section 1). If you want to run an nf-core pipeline or module, use
+`bioledger tool search` — it's auto-discoverable. This example wraps
+[CAPHEINE](https://github.com/veg/CAPHEINE), a real non-nf-core Nextflow workflow
+from the veg GitHub org for automated evolutionary selection analysis:
 
 ```yaml
 execution:
-  name: nfcore_rnaseq
+  name: capheine
   executors: [nextflow]
   # No container/conda_deps — Nextflow manages its own environment via profiles
   command: >-
-    nextflow run nf-core/rnaseq -r 3.14.0
-    --input {{inputs.samplesheet}}
+    nextflow run veg/CAPHEINE
+    --reference_genes {{inputs.reference_genes}}
+    --unaligned_seqs {{inputs.unaligned_seqs}}
     --outdir {{outputs._dir}}
-    -profile test,docker
+    -profile docker
 ```
 
 **Key points:**
 - `container` and `conda_deps` are **not allowed** when `executors` contains only engine types (`nextflow`, `snakemake`, `galaxy`) — the engine manages its own environment
 - The `command` field is the full `nextflow run` invocation — BioLedger stages inputs and runs it as a subprocess
-- For **discovered** nf-core modules (single modules, not whole pipelines), use `bioledger tool search` and the agent's `submit_discovered` path — see [Tool discovery](../tool_discovery/)
+- nf-core **modules** are auto-discoverable via `bioledger tool search`. nf-core **pipelines** (e.g. `nf-core/rnaseq`) and non-nf-core workflows (like CAPHEINE) are not — you need a spec like this for those
 - Requires `bioledger[nextflow]` — install Nextflow separately
 
 **Import and validate:**
 ```bash
-bioledger tool import examples/tool_building/nfcore_rnaseq.bioledger.yaml
-bioledger tool validate ~/.bioledger/tools/nfcore_rnaseq.bioledger.yaml
+bioledger tool import examples/tool_building/capheine_nextflow.bioledger.yaml
+bioledger tool validate ~/.bioledger/tools/capheine_nextflow.bioledger.yaml
 ```
 
 **Run in a session:**
 ```
-you> run nfcore_rnaseq on the samplesheet
-assistant> Submitted nfcore_rnaseq as job abc123 (engine: nextflow).
+you> run capheine on the pathogen sequences with the reference genes
+assistant> Submitted capheine as job abc123 (engine: nextflow).
 ```
 
 ---
 
-## 3. Galaxy executor — `seqtk_galaxy.bioledger.yaml`
+## 3. Galaxy executor — `toolshed_agat.bioledger.yaml`
 
-For tools that should run via Galaxy (local planemo or remote Galaxy instance).
-
-**Discovered tools** (from Tool Shed search): BioLedger generates a `.ga` workflow
-and submits it via planemo with the downloaded tool XML.
-
-**User-defined specs**: The `command` field must contain a valid Galaxy/planemo
-invocation (e.g. `planemo run tool.xml --input ...`). BioLedger runs this
-directly as a subprocess.
+Wrapping a specific versioned tool from the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/).
+This example wraps [AGAT](https://github.com/NBISweden/AGAT) from the `bgruening/agat`
+repo at a pinned changeset revision (`6d8be3337e2a`, numeric revision 7). The
+`command` field downloads the tool XML at that revision and runs it via `planemo run`:
 
 ```yaml
 execution:
-  name: seqtk_galaxy
+  name: toolshed_agat
+  version: "1.7.0+galaxy0"
   executors: [galaxy]
-  # no container — Galaxy manages its own tool environment
+  # No container/conda_deps — Galaxy/planemo manages its own tool environment
   command: >-
-    planemo run {{inputs.tool_xml}} --input {{inputs.reads}} --output {{outputs._dir}}/output.fa
+    curl -sL "https://toolshed.g2.bx.psu.edu/repos/bgruening/agat/raw/6d8be3337e2a/agat.xml"
+    -o {{outputs._dir}}/agat.xml &&
+    planemo run {{outputs._dir}}/agat.xml
+    --input {{inputs.gff}}
+    --output {{outputs._dir}}/output.gff3
   inputs:
-    reads:
+    gff:
       type: file
-      format: fastq
+      format: gff
       required: true
-    tool_xml:
-      type: file
-      format: xml
-      required: true
-      description: "Galaxy tool XML wrapper"
 ```
 
 **Key points:**
 - Like Nextflow, `container` and `conda_deps` are **not allowed** — Galaxy manages its own tool environment
-- For **discovered tools** (Tool Shed), BioLedger generates a `.ga` workflow and submits it via planemo with `--tool_dir`
-- For **user-defined specs**, the `command` field must be a valid planemo/Galaxy invocation — BioLedger runs it directly as a subprocess
-- At runtime, the Galaxy adapter submits to a local planemo instance or a remote Galaxy server (configured in `engines.galaxy`)
+- The `command` field pins a specific Tool Shed changeset revision (`6d8be3337e2a`) — this ensures reproducibility. The Tool Shed repo can change at any time, but this spec always fetches the same version
+- The raw download URL pattern is: `https://toolshed.g2.bx.psu.edu/repos/<owner>/<repo>/raw/<changeset_revision>/<tool_xml>`
+- **Any** Tool Shed repo (any owner — iuc, bgruening, devteam, etc.) is auto-discoverable via `bioledger tool search`. You'd hand-author a spec like this when you need to **pin a specific changeset revision** for reproducibility — auto-discovery always fetches the latest
+- At runtime, the Galaxy adapter runs the command directly as a subprocess
 - Requires `bioledger[galaxy]` — install planemo separately
 
 **Import and validate:**
 ```bash
-bioledger tool import examples/tool_building/seqtk_galaxy.bioledger.yaml
-bioledger tool validate ~/.bioledger/tools/seqtk_galaxy.bioledger.yaml
+bioledger tool import examples/tool_building/toolshed_agat.bioledger.yaml
+bioledger tool validate ~/.bioledger/tools/toolshed_agat.bioledger.yaml
 ```
 
 **Run in a session:**
 ```
-you> run seqtk_galaxy on the raw reads
-assistant> Submitted seqtk_galaxy as job abc123 (engine: galaxy).
+you> run toolshed_agat on the gff file
+assistant> Submitted toolshed_agat as job abc123 (engine: galaxy).
 ```
 
 ---

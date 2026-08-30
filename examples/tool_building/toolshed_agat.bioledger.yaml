@@ -1,0 +1,44 @@
+spec_version: "0.1"
+revision: "1"
+execution:
+  name: toolshed_agat
+  version: "1.7.0+galaxy0"
+  description: "AGAT — GTF/GFF analysis toolkit (bgruening/agat @ 6d8be3337e2a)"
+  executors:
+    - galaxy
+  # No container/conda_deps — Galaxy/planemo manages its own tool environment.
+  #
+  # This wraps a specific versioned Tool Shed tool:
+  #   repo:     bgruening/agat
+  #   revision: 6d8be3337e2a (numeric revision 7)
+  #   tool:     agat (v1.7.0+galaxy0)
+  #   XML:      https://toolshed.g2.bx.psu.edu/repos/bgruening/agat/raw/6d8be3337e2a/agat.xml
+  #
+  # The command downloads the tool XML at the pinned revision, then runs it
+  # via planemo. Pinning the changeset revision ensures reproducibility —
+  # the Tool Shed repo can change at any time, but this spec always fetches
+  # the same version.
+  command: >-
+    curl -sL "https://toolshed.g2.bx.psu.edu/repos/bgruening/agat/raw/6d8be3337e2a/agat.xml"
+    -o {{outputs._dir}}/agat.xml &&
+    planemo run {{outputs._dir}}/agat.xml
+    --input {{inputs.gff}}
+    --output {{outputs._dir}}/output.gff3
+  inputs:
+    gff:
+      type: file
+      format: gff
+      required: true
+      description: "Input GTF or GFF annotation file"
+  outputs:
+    fixed_gff:
+      type: file
+      format: gff3
+      pattern: "output.gff3"
+      description: "Fixed and standardized GFF3 output"
+  parameters: {}
+  categories:
+    - annotation
+    - format-conversion
+  homepage: "https://github.com/NBISweden/AGAT"
+  license: "GPL-3.0"

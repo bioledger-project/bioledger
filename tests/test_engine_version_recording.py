@@ -136,7 +136,7 @@ class TestExecutorVersionPopulated:
     def test_executor_version_populated_on_discovered(self):
         """submit_discovered should set entry.executor_version from RunHandle.metadata.
 
-        Mocks the nf-core download/parse path to avoid network calls.
+        Mocks the nf-core install/parse path to avoid network calls.
         """
         from bioledger.forges.analysisforge.agent import AnalysisForgeAgent
         from bioledger.config import BioLedgerConfig
@@ -160,12 +160,17 @@ class TestExecutorVersionPopulated:
             patch("bioledger.core.engines.dispatch._get_engine_adapter", return_value=mock_adapter),
             patch("bioledger.forges.analysisforge.agent._write_engine_metadata_sidecar"),
             patch("bioledger.forges.analysisforge.agent.get_session_dir", return_value=Path("/tmp/bioledger-test/sessions/test")),
-            patch("bioledger.core.engines.nfcore_search.download_module", return_value=Path("/tmp/nf-module")),
+            patch("bioledger.core.engines.nfcore_search.install_nfcore_module", return_value=(Path("/tmp/nf-module"), "abc123")),
             patch("bioledger.core.engines.nfcore_search.parse_meta_yml", return_value={
                 "inputs": ["reads"],
                 "outputs": {"bam": "*.bam"},
                 "container": "quay.io/biocontainers/test:1.0",
             }),
+            patch("bioledger.core.engines.nfcore_search.generate_nfcore_wrapper", return_value="// wrapper"),
+            patch("pathlib.Path.mkdir", return_value=None),
+            patch("pathlib.Path.write_text", return_value=None),
+            patch("pathlib.Path.exists", return_value=False),
+            patch("pathlib.Path.rglob", return_value=[]),
         ):
             entry, rh = agent.submit_discovered(
                 tool_name="nf_test",
@@ -176,3 +181,99 @@ class TestExecutorVersionPopulated:
 
         assert entry.executor_version == "nextflow 23.10.0"
         assert entry.executor == "nextflow"
+        assert entry.discovered_revision == "abc123"
+
+    def test_pinned_revision_nfcore(self):
+        """submit_discovered with @<revision> should pass it to install_nfcore_module."""
+        from bioledger.forges.analysisforge.agent import AnalysisForgeAgent
+        from bioledger.config import BioLedgerConfig
+
+        session = LedgerSession(name="test-pinned-nfcore")
+        config = MagicMock(spec=BioLedgerConfig)
+        config.home_dir = Path("/tmp/bioledger-test")
+        config.engines = None
+
+        agent = AnalysisForgeAgent.__new__(AnalysisForgeAgent)
+        agent.session = session
+        agent.config = config
+        agent.store = MagicMock()
+        agent.store.save_session = MagicMock()
+
+        mock_adapter = MagicMock()
+        mock_run_handle = _make_run_handle("nextflow", "nextflow 23.10.0")
+        mock_adapter.submit_spec.return_value = mock_run_handle
+
+        with (
+            patch("bioledger.core.engines.dispatch._get_engine_adapter", return_value=mock_adapter),
+            patch("bioledger.forges.analysisforge.agent._write_engine_metadata_sidecar"),
+            patch("bioledger.forges.analysisforge.agent.get_session_dir", return_value=Path("/tmp/bioledger-test/sessions/test")),
+            patch("bioledger.core.engines.nfcore_search.install_nfcore_module", return_value=(Path("/tmp/nf-module"), "deadbeef")) as mock_install,
+            patch("bioledger.core.engines.nfcore_search.parse_meta_yml", return_value={
+                "inputs": ["reads"],
+                "outputs": {"bam": "*.bam"},
+                "container": "quay.io/biocontainers/test:1.0",
+            }),
+            patch("bioledger.core.engines.nfcore_search.generate_nfcore_wrapper", return_value="// wrapper"),
+            patch("pathlib.Path.mkdir", return_value=None),
+            patch("pathlib.Path.write_text", return_value=None),
+            patch("pathlib.Path.exists", return_value=False),
+            patch("pathlib.Path.rglob", return_value=[]),
+        ):
+            entry, rh = agent.submit_discovered(
+                tool_name="nf_pinned",
+                discovered_source="nfcore:rna_seq@deadbeef",
+                input_mapping={"reads": "data/*.fastq"},
+                params={},
+            )
+
+        mock_install.assert_called_once()
+        assert mock_install.call_args.kwargs.get("revision") == "deadbeef"
+        assert entry.discovered_revision == "deadbeef"
+
+    def test_pinned_revision_toolshed(self):
+        """submit_discovered with @<revision> should pass it to download_tool."""
+        from bioledger.forges.analysisforge.agent import AnalysisForgeAgent
+        from bioledger.config import BioLedgerConfig
+
+        session = LedgerSession(name="test-pinned-toolshed")
+        config = MagicMock(spec=BioLedgerConfig)
+        config.home_dir = Path("/tmp/bioledger-test")
+        config.engines = None
+
+        agent = AnalysisForgeAgent.__new__(AnalysisForgeAgent)
+        agent.session = session
+        agent.config = config
+        agent.store = MagicMock()
+        agent.store.save_session = MagicMock()
+
+        mock_adapter = MagicMock()
+        mock_run_handle = _make_run_handle("galaxy", "planemo 2.16.0")
+        mock_adapter.submit_spec.return_value = mock_run_handle
+
+        with (
+            patch("bioledger.core.engines.dispatch._get_engine_adapter", return_value=mock_adapter),
+            patch("bioledger.forges.analysisforge.agent._write_engine_metadata_sidecar"),
+            patch("bioledger.forges.analysisforge.agent.get_session_dir", return_value=Path("/tmp/bioledger-test/sessions/test")),
+            patch("bioledger.core.engines.toolshed_search.download_tool", return_value=(Path("/tmp/tool"), "abc123")) as mock_dl,
+            patch("bioledger.core.engines.toolshed_search.parse_tool_to_spec") as mock_parse,
+            patch("pathlib.Path.mkdir", return_value=None),
+            patch("pathlib.Path.glob", return_value=[]),
+        ):
+            mock_parse.return_value = MagicMock(
+                name="bowtie2",
+                inputs={},
+                outputs={},
+                container="",
+                command="",
+                model_dump=MagicMock(return_value={}),
+            )
+            entry, rh = agent.submit_discovered(
+                tool_name="galaxy_pinned",
+                discovered_source="toolshed:devteam/bowtie2@abc123",
+                input_mapping={},
+                params={},
+            )
+
+        mock_dl.assert_called_once()
+        assert mock_dl.call_args.kwargs.get("revision") == "abc123"
+        assert entry.discovered_revision == "abc123"

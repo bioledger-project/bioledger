@@ -1,0 +1,42 @@
+spec_version: "0.1"
+revision: "1"
+execution:
+  name: capheine
+  version: "1.0.0"
+  description: "CAPHEINE — automated evolutionary selection analysis using HyPhy (veg/CAPHEINE)"
+  executors:
+    - nextflow
+  # No container/conda_deps — Nextflow manages its own environment via profiles.
+  # This wraps a real, non-nf-core Nextflow workflow from the veg GitHub org.
+  # nf-core pipelines and modules are auto-discoverable via `bioledger tool search`;
+  # this spec is for wrapping external workflows that are NOT in nf-core.
+  command: >-
+    nextflow run veg/CAPHEINE
+    --reference_genes {{inputs.reference_genes}}
+    --unaligned_seqs {{inputs.unaligned_seqs}}
+    --outdir {{outputs._dir}}
+    -profile docker
+  inputs:
+    reference_genes:
+      type: file
+      format: fasta
+      required: true
+      description: "Reference gene sequences (FASTA)"
+    unaligned_seqs:
+      type: file
+      format: fasta
+      required: true
+      description: "Unaligned pathogen sequences to analyze (FASTA)"
+  outputs:
+    results:
+      type: directory
+      pattern: "*"
+      description: "CAPHEINE output directory (selection analysis CSVs, MultiQC report)"
+  parameters: {}
+  categories:
+    - pipeline
+    - evolutionary-analysis
+    - selection
+  homepage: "https://github.com/veg/CAPHEINE"
+  citation: "CAPHEINE, or everything and the kitchen sink: a workflow for automating selection analyses using HyPhy"
+  license: "MIT"
