@@ -216,12 +216,16 @@ def generate_nfcore_wrapper(
     module_dir: Path,
     meta: dict,
     entry_id: str,
-) -> str:
-    """Generate a wrapper main.nf for an nf-core module.
+) -> tuple[str, str]:
+    """Generate a wrapper main.nf and companion nextflow.config.
 
-    The wrapper includes the module process, creates channels from params,
-    and sets ``publishDir`` to ``params.outdir`` so outputs land in the
-    work directory.
+    The wrapper includes the module process and creates channels from
+    params. ``publishDir`` is a process directive — it cannot appear at
+    top level in a DSL2 script — so output publishing is configured in
+    the companion nextflow.config via a ``withName`` selector that sets
+    ``publishDir = params.outdir``, mirroring how real nf-core pipelines
+    publish via ``conf/modules.config``. Outputs then land in the work
+    directory given ``--outdir .``.
 
     Args:
         module_subdir: The nf-core subdirectory (e.g. "align/bowtie2/align").
@@ -230,7 +234,8 @@ def generate_nfcore_wrapper(
         entry_id: The ledger entry ID, used for the include path.
 
     Returns:
-        The wrapper main.nf content as a string.
+        Tuple of (wrapper main.nf content, nextflow.config content).
+        The config string is empty when the module declares no outputs.
     """
     module_name = module_subdir.split("/")[-1]
     input_names = meta.get("inputs", [])
@@ -251,35 +256,32 @@ def generate_nfcore_wrapper(
 
     inputs_str = ", ".join(f"{name}_ch" for name in input_names) or "input_ch"
 
-    # Build publishDir for outputs
-    publish_lines = []
-    for out_name in output_names:
-        publish_lines.append(
-            "    publishDir params.outdir, mode: 'copy'"
-        )
-        break  # One publishDir is enough for all outputs
-
     lines = [
         f"// Auto-generated wrapper for nf-core module {module_subdir}",
         f"// Entry ID: {entry_id}",
         "",
         f"include {{ {module_name} }} from './{include_path}'",
         "",
-    ]
-
-    if publish_lines:
-        lines.extend(publish_lines)
-        lines.append("")
-
-    lines.extend([
         "workflow {",
         *channel_lines,
         f"    {module_name}({inputs_str})",
         "}",
         "",
-    ])
+    ]
 
-    return "\n".join(lines)
+    config = ""
+    if output_names:
+        config = "\n".join([
+            f"// Auto-generated config for nf-core module {module_subdir}",
+            "process {",
+            f"    withName: '{module_name}' {{",
+            "        publishDir = [path: params.outdir, mode: 'copy']",
+            "    }",
+            "}",
+            "",
+        ])
+
+    return "\n".join(lines), config
 
 
 def parse_meta_yml(module_dir: Path) -> dict:

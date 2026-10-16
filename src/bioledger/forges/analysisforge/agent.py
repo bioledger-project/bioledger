@@ -1211,7 +1211,7 @@ class AnalysisForgeAgent:
             # Generate wrapper main.nf content
             # We need the entry.id for the wrapper, but it's created below.
             # Use a placeholder that we'll replace after entry creation.
-            wrapper_content = generate_nfcore_wrapper(
+            wrapper_content, config_content = generate_nfcore_wrapper(
                 subdir, module_dir, meta, "__ENTRY_ID__",
             )
             wrapper_path = work_dir / "module" / "wrapper_main.nf"
@@ -1219,6 +1219,10 @@ class AnalysisForgeAgent:
 
             # Populate companion_files with wrapper + full module tree
             companion_files["wrapper_main.nf"] = str(wrapper_path)
+            if config_content:
+                config_path = work_dir / "module" / "nextflow.config"
+                config_path.write_text(config_content)
+                companion_files["nextflow.config"] = str(config_path)
             for f in module_dir.rglob("*"):
                 if f.is_file():
                     rel = f.relative_to(work_dir / "module")
@@ -1325,9 +1329,13 @@ class AnalysisForgeAgent:
             input_args = " ".join(
                 f"--{name} {{{{ inputs.{name} }}}}" for name in spec.inputs
             )
+            config_flag = (
+                f"-c ${{projectDir}}/{entry.id}/nextflow.config "
+                if "nextflow.config" in companion_files else ""
+            )
             spec.command = (
                 f"nextflow run ${{projectDir}}/{entry.id}/wrapper_main.nf "
-                f"{input_args} --outdir {{{{ outputs._dir }}}}"
+                f"{config_flag}{input_args} --outdir {{{{ outputs._dir }}}}"
             )
             # Update the snapshot with the real command
             entry.tool_spec_snapshot = spec.model_dump()

@@ -83,7 +83,7 @@ class TestGenerateNfcoreWrapper:
             "outputs": {"bam": "*.bam"},
             "container": "quay.io/biocontainers/bowtie2:2.5.0",
         }
-        wrapper = generate_nfcore_wrapper(
+        wrapper, config = generate_nfcore_wrapper(
             "align/bowtie2/bowtie2_align",
             tmp_path,
             meta,
@@ -94,7 +94,11 @@ class TestGenerateNfcoreWrapper:
         assert "reads_ch" in wrapper
         assert "index_ch" in wrapper
         assert "workflow {" in wrapper
-        assert "publishDir" in wrapper
+        # publishDir is a process directive — it must live in the
+        # companion config via withName, not in the top-level script
+        assert "publishDir" not in wrapper
+        assert "withName: 'bowtie2_align'" in config
+        assert "publishDir = [path: params.outdir, mode: 'copy']" in config
 
     def test_wrapper_no_inputs_uses_fallback_channel(self, tmp_path):
         """generate_nfcore_wrapper() with no inputs should use input_ch."""
@@ -103,7 +107,7 @@ class TestGenerateNfcoreWrapper:
             "outputs": {"out": "*.out"},
             "container": "",
         }
-        wrapper = generate_nfcore_wrapper(
+        wrapper, config = generate_nfcore_wrapper(
             "utils/sometool",
             tmp_path,
             meta,
@@ -111,3 +115,20 @@ class TestGenerateNfcoreWrapper:
         )
         assert "input_ch" in wrapper
         assert "sometool" in wrapper
+        assert config  # outputs declared → publishDir config emitted
+
+    def test_wrapper_no_outputs_emits_empty_config(self, tmp_path):
+        """Modules with no outputs don't need a publishDir config."""
+        meta = {
+            "inputs": ["reads"],
+            "outputs": {},
+            "container": "",
+        }
+        wrapper, config = generate_nfcore_wrapper(
+            "utils/sometool",
+            tmp_path,
+            meta,
+            "test_entry_003",
+        )
+        assert "sometool" in wrapper
+        assert config == ""
