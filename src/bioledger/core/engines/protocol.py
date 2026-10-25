@@ -19,11 +19,27 @@ to/from JSON directly so they survive process restarts alongside the
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
+
+
+@dataclass
+class RunResult:
+    """Terminal result of a local runner (Docker or Conda) process.
+
+    Lives here — not in ``containers/docker.py`` — so CondaRunner and the
+    executor can share the type without importing the optional ``docker``
+    package. Re-exported from ``containers.docker`` for compatibility.
+    """
+
+    exit_code: int
+    stdout: str
+    stderr: str
+    duration_seconds: float
 
 
 class RunStatus(BaseModel):

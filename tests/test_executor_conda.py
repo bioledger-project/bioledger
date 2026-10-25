@@ -210,6 +210,8 @@ class TestRunToolConda:
         session_dir = tmp_path / "sessions" / session.id
 
         spec = _make_conda_spec()
+        input_bam = tmp_path / "input.bam"
+        input_bam.write_bytes(b"BAM")
 
         with patch.object(CondaRunner, "ensure_env", return_value="bioledger_abc123"), \
              patch.object(CondaRunner, "submit", return_value="99999") as mock_submit, \
@@ -224,7 +226,7 @@ class TestRunToolConda:
             entry, result = run_tool(
                 session=session,
                 spec=spec,
-                input_files={},
+                input_files={"input_bam": input_bam},
                 session_dir=session_dir,
                 params={},
             )
@@ -254,6 +256,8 @@ class TestRunToolConda:
         session_dir = tmp_path / "sessions" / session.id
 
         spec = _make_conda_spec()
+        input_bam = tmp_path / "input.bam"
+        input_bam.write_bytes(b"BAM")
 
         with patch.object(CondaRunner, "ensure_env", return_value="bioledger_xyz"), \
              patch.object(CondaRunner, "submit", return_value="99999"), \
@@ -267,7 +271,7 @@ class TestRunToolConda:
                 run_tool(
                     session=session,
                     spec=spec,
-                    input_files={},
+                    input_files={"input_bam": input_bam},
                     session_dir=session_dir,
                     params={},
                     timeout=0,  # immediate timeout

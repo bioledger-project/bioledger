@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 load_dotenv()  # Load .env into process environment before anything else
 
 import typer  # noqa: E402
-import docker.errors  # noqa: E402
 from rich.console import Console  # noqa: E402
 from rich.markup import escape as rich_escape  # noqa: E402
 from rich.table import Table  # noqa: E402
@@ -487,8 +486,15 @@ async def _analysis_chat(session_id: str) -> None:
                 store.append_message(session.id, session.chat_messages[-1])
         except (ConnectionError, OSError):
             pass
-        except docker.errors.DockerException:
-            pass
+        except Exception as exc:
+            # Docker daemon errors are transient — ignore them in the poll
+            # loop. Imported lazily: docker is an optional dependency.
+            try:
+                import docker.errors
+            except ImportError:
+                raise exc
+            if not isinstance(exc, docker.errors.DockerException):
+                raise
 
         try:
             user_input = console.input("[green]you>[/green] ").strip()

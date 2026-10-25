@@ -17,12 +17,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from bioledger.core.containers.docker import RunResult
 from bioledger.core.engines._subprocess import (
     EXIT_CODE_ENV_VAR,
     EXIT_CODE_FILENAME,
 )
-from bioledger.core.engines.protocol import _is_process_alive
+from bioledger.core.engines.protocol import RunResult, _is_process_alive
 
 
 def _conda_binary() -> str:

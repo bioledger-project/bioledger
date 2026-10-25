@@ -103,6 +103,7 @@ def _generate_snakefile(
 
     Returns (rule_names, collection_inputs).
     """
+    from bioledger.core.engines._subprocess import _OutputRef
     from bioledger.toolspec import get_jinja_env
 
     spec_outputs = getattr(spec, "outputs", {}) or {}
@@ -142,8 +143,12 @@ def _generate_snakefile(
     inputs_ctx = {
         n: "{input.%s}" % n for n in collection_inputs + single_inputs
     }
+    # _OutputRef so {{ outputs.X }} and {{ outputs.X.path }} both resolve —
+    # a plain str renders "" for the .path form.
     outputs_ctx: dict[str, Any] = {"_dir": "."}
-    outputs_ctx.update({n: "{output.%s}" % n for n, _ in output_items})
+    outputs_ctx.update(
+        {n: _OutputRef("{output.%s}" % n) for n, _ in output_items}
+    )
     params_ctx = {n: "{params.%s}" % n for n in spec_params}
     rendered_cmd = get_jinja_env().from_string(command_template).render(
         {"inputs": inputs_ctx, "outputs": outputs_ctx,

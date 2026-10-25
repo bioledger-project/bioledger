@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
 from datetime import datetime
 
 import docker
 import docker.errors
+
+from bioledger.core.engines.protocol import RunResult  # noqa: F401
 
 # Docker's zero-value timestamp for "not yet set" (e.g. FinishedAt on a
 # still-running container).
@@ -14,14 +15,6 @@ _ZERO_DOCKER_TIME = "0001-01-01T00:00:00Z"
 
 # Statuses that mean "still going" — anything else is treated as terminal.
 _NON_TERMINAL_STATUSES = {"created", "running", "restarting", "paused"}
-
-
-@dataclass
-class RunResult:
-    exit_code: int
-    stdout: str
-    stderr: str
-    duration_seconds: float
 
 
 def _parse_docker_timestamp(ts: str) -> datetime:

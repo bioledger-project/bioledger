@@ -290,7 +290,9 @@ def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
                     options=options or None,
                 )
 
-    # Extract outputs from <outputs><data> elements
+    # Extract outputs from <outputs><data> and <collection> elements.
+    # Collections materialize as directories named after the collection —
+    # the trailing "/" marks a directory-type output pattern.
     outputs: dict[str, ToolOutput] = {}
     outputs_elem = root.find("outputs")
     if outputs_elem is not None:
@@ -307,6 +309,16 @@ def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
                 type=ParamType.FILE,
                 format=out_format,
                 pattern=out_pattern,
+            )
+        for coll in outputs_elem.findall("collection"):
+            out_name = coll.get("name", "")
+            if not out_name:
+                continue
+            outputs[out_name] = ToolOutput(
+                name=out_name,
+                type=ParamType.FILE,
+                format=coll.get("format", "any"),
+                pattern=f"{out_name}/",
             )
 
     # command is left empty — submit_discovered() sets it to the planemo

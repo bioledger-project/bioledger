@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from bioledger.core.conda_runner import CondaRunner
-from bioledger.core.containers.docker import DockerRunner, RunResult
+from bioledger.core.engines.protocol import RunResult
 from bioledger.ledger.models import (
     ContainerInfo,
     EntryKind,
@@ -28,6 +28,16 @@ from bioledger.toolspec.models import (
     ToolInput,
     ToolSpec,
 )
+
+try:
+    from bioledger.core.containers.docker import DockerRunner
+except ImportError:  # optional dependency — importing this module must not fail
+    def DockerRunner(*args: Any, **kwargs: Any):  # type: ignore[no-redef]
+        raise RuntimeError(
+            "The 'docker' package is not installed — Docker execution "
+            "requires: pip install bioledger[docker]"
+        )
+
 
 # File names used when persisting container stdout/stderr to disk.
 _LOG_NAMES = ("stdout.log", "stderr.log")
@@ -326,9 +336,24 @@ def _render_command(
     outputs._dir resolves to /work.
     outputs.<name>.path resolves to /work/<pattern>.
     """
+    from bioledger.core.engines._subprocess import _OutputRef
+
+    missing_required = [
+        name
+        for name, idef in spec.execution.inputs.items()
+        if idef.required and name not in input_mapping
+    ]
+    if missing_required:
+        raise ValueError(
+            f"Missing required input(s) for '{spec.name}': "
+            + ", ".join(sorted(missing_required))
+        )
+
     outputs_ctx: dict[str, Any] = {"_dir": work_mount}
     for name, out in spec.execution.outputs.items():
-        outputs_ctx[name] = {"path": f"{work_mount}/{out.pattern}"}
+        # _OutputRef so both {{ outputs.X }} and {{ outputs.X.path }}
+        # render to the path — a plain dict breaks bare {{ outputs.X }}.
+        outputs_ctx[name] = _OutputRef(f"{work_mount}/{out.pattern}")
 
     # Build inputs context — absent optionals render as empty string
     inputs_ctx: dict[str, str] = {}
@@ -668,6 +693,85 @@ def poll_tool(entry: LedgerEntry, session_dir: Path) -> LedgerEntry:
     return _finalize_entry(entry, spec, run_dir, result, pre_snapshot, staged_input_paths)
 
 
+def _timeout_cleanup(
+    runner: DockerRunner | CondaRunner,
+    entry: LedgerEntry,
+    run_dir: Path,
+) -> tuple[str, str]:
+    """Capture logs, kill the timed-out run, and mark the entry failed.
+
+    Logs are captured BEFORE the container/process is removed — a timeout
+    is exactly when they're needed to diagnose the hang. Captured text is
+    persisted as ``role="log"`` FileRefs so it survives in the ledger even
+    though ``_finalize_entry`` never runs. Returns (stdout, stderr).
+    """
+    # Docker runners have a 'client' attribute; CondaRunners don't.
+    # Use getattr instead of isinstance so mocked runners work.
+    docker_client = getattr(runner, "client", None)
+    stdout_text = stderr_text = ""
+    if docker_client is not None:
+        try:
+            container = runner.client.containers.get(entry.run_handle_id)
+            _out = container.logs(stdout=True, stderr=False).decode(errors="replace")
+            _err = container.logs(stdout=False, stderr=True).decode(errors="replace")
+            stdout_text = _out if isinstance(_out, str) else ""
+            stderr_text = _err if isinstance(_err, str) else ""
+        except Exception:
+            pass
+        try:
+            container = runner.client.containers.get(entry.run_handle_id)
+            container.kill()
+        except Exception:
+            pass
+        try:
+            container = runner.client.containers.get(entry.run_handle_id)
+            container.remove(force=True)
+        except Exception:
+            pass
+    else:
+        try:
+            pid = int(entry.run_handle_id)
+            # Guard against PID recycling: if we recorded the process
+            # start time, verify it hasn't been recycled.
+            start_time_path = run_dir / "_process_start_time.json"
+            if start_time_path.exists():
+                expected = json.loads(start_time_path.read_text())
+                from bioledger.core.engines.protocol import _is_process_alive
+                if _is_process_alive(pid, expected):
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+            else:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+        # Local-process logs live in run_dir files
+        for name in _LOG_NAMES + ("engine.log",):
+            lp = run_dir / name
+            if lp.exists():
+                try:
+                    text = lp.read_text(errors="replace")
+                    if name == "stdout.log":
+                        stdout_text = stdout_text or text
+                    else:
+                        stderr_text = stderr_text or text
+                except OSError:
+                    pass
+    entry.run_status = "failed"
+    entry.exit_code = -1
+    for name, text in (("stdout.log", stdout_text), ("stderr.log", stderr_text)):
+        if text:
+            lp = run_dir / name
+            lp.write_text(text, encoding="utf-8")
+            entry.files.append(
+                FileRef(
+                    path=str(lp),
+                    sha256=_hash_file(lp),
+                    size_bytes=lp.stat().st_size,
+                    role="log",
+                )
+            )
+    return stdout_text, stderr_text
+
+
 def run_tool(
     session: LedgerSession,
     spec: ToolSpec,
@@ -706,81 +810,7 @@ def run_tool(
     result = _poll_runner(runner, entry.run_handle_id, run_dir)
     while result is None:
         if time.monotonic() - start > timeout:
-            # Docker runners have a 'client' attribute; CondaRunners don't.
-            # Use getattr instead of isinstance so mocked runners work.
-            docker_client = getattr(runner, "client", None)
-            # Capture logs BEFORE removing the container — a timeout is
-            # exactly when logs are needed to diagnose the hang.
-            stdout_text = stderr_text = ""
-            if docker_client is not None:
-                try:
-                    container = runner.client.containers.get(entry.run_handle_id)
-                    _out = container.logs(
-                        stdout=True, stderr=False,
-                    ).decode(errors="replace")
-                    _err = container.logs(
-                        stdout=False, stderr=True,
-                    ).decode(errors="replace")
-                    stdout_text = _out if isinstance(_out, str) else ""
-                    stderr_text = _err if isinstance(_err, str) else ""
-                except Exception:
-                    pass
-                try:
-                    container = runner.client.containers.get(entry.run_handle_id)
-                    container.kill()
-                except Exception:
-                    pass
-                try:
-                    container = runner.client.containers.get(entry.run_handle_id)
-                    container.remove(force=True)
-                except Exception:
-                    pass
-            else:
-                try:
-                    pid = int(entry.run_handle_id)
-                    # Guard against PID recycling: if we recorded the
-                    # process start time, verify it hasn't been recycled.
-                    start_time_path = run_dir / "_process_start_time.json"
-                    if start_time_path.exists():
-                        expected = json.loads(start_time_path.read_text())
-                        from bioledger.core.engines.protocol import _is_process_alive
-                        if _is_process_alive(pid, expected):
-                            os.killpg(os.getpgid(pid), signal.SIGKILL)
-                    else:
-                        os.killpg(os.getpgid(pid), signal.SIGKILL)
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-                # Local-process logs live in run_dir files
-                for name in _LOG_NAMES + ("engine.log",):
-                    lp = run_dir / name
-                    if lp.exists():
-                        try:
-                            text = lp.read_text(errors="replace")
-                            if name == "stdout.log":
-                                stdout_text = stdout_text or text
-                            else:
-                                stderr_text = stderr_text or text
-                        except OSError:
-                            pass
-            entry.run_status = "failed"
-            entry.exit_code = -1
-            # Persist captured logs as entry FileRefs so they survive in
-            # the ledger even though _finalize_entry never runs.
-            for name, text in (
-                ("stdout.log", stdout_text),
-                ("stderr.log", stderr_text),
-            ):
-                if text:
-                    lp = run_dir / name
-                    lp.write_text(text, encoding="utf-8")
-                    entry.files.append(
-                        FileRef(
-                            path=str(lp),
-                            sha256=_hash_file(lp),
-                            size_bytes=lp.stat().st_size,
-                            role="log",
-                        )
-                    )
+            _, stderr_text = _timeout_cleanup(runner, entry, run_dir)
             tail = stderr_text.strip().splitlines()[-3:]
             raise TimeoutError(
                 f"Process {entry.run_handle_id} exceeded timeout of {timeout}s"
@@ -821,7 +851,14 @@ def run_script(
             name=f"script_{script_path.stem}",
             container=container,
             command=f"python /scripts/{script_path.name}",
-            inputs={"script": ToolInput(type=ParamType.FILE, format="any")},
+            # "script" is bind-mounted at /scripts, not staged through
+            # input_mapping — mark optional so required-input validation
+            # doesn't reject the missing mapping.
+            inputs={
+                "script": ToolInput(
+                    type=ParamType.FILE, format="any", required=False
+                )
+            },
             status=SpecStatus.DRAFT,
         )
     )
@@ -883,20 +920,11 @@ def run_script(
     result = runner.poll(container_id)
     while result is None:
         if time.monotonic() - start > timeout:
-            try:
-                c = runner.client.containers.get(container_id)
-                c.kill()
-            except Exception:
-                pass
-            try:
-                c = runner.client.containers.get(container_id)
-                c.remove(force=True)
-            except Exception:
-                pass
-            entry.run_status = "failed"
-            entry.exit_code = -1
+            _, stderr_text = _timeout_cleanup(runner, entry, run_dir)
+            tail = stderr_text.strip().splitlines()[-3:]
             raise TimeoutError(
                 f"Container {container_id} exceeded timeout of {timeout}s"
+                + (f" — stderr tail: {' | '.join(tail)[:300]}" if tail else "")
             )
         time.sleep(poll_interval)
         result = runner.poll(container_id)

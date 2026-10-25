@@ -26,7 +26,10 @@ def _cache_path(key: str) -> Path:
 def _read_cache(key: str) -> list[dict] | None:
     path = _cache_path(key)
     if path.exists():
-        data = json.loads(path.read_text())
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None  # corrupt cache — treat as a miss
         if time.time() - data.get("ts", 0) < _CACHE_TTL:
             return data["results"]
     return None
@@ -55,7 +58,10 @@ async def search_biocontainers(tool_name: str) -> list[dict[str, Any]]:
         )
         resp.raise_for_status()
         results = resp.json()
-    _write_cache(tool_name, results)
+    if results:
+        # Don't 24h-cache an empty result — a tool may be published
+        # (or the API may have blipped) within the TTL.
+        _write_cache(tool_name, results)
     return results
 
 

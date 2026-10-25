@@ -11,6 +11,7 @@ without depending on the config module.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -59,6 +60,9 @@ class GalaxyEngineConfig(EngineConfig):
 
     @model_validator(mode="after")
     def _validate_remote_mode(self) -> "GalaxyEngineConfig":
+        env_key = os.environ.get("BIOLEDGER_GALAXY_API_KEY")
+        if env_key is not None:
+            self.api_key = env_key
         if self.mode == "remote":
             if not self.url:
                 raise ValueError(

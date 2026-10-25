@@ -146,9 +146,13 @@ def _output_name_to_filename(entry: LedgerEntry) -> dict[str, str]:
         if pattern and "*" not in pattern:
             result[name] = pattern
         else:
+            # No recorded output (running/failed run): a bare `name` may
+            # not satisfy the declared `path '<glob>', emit:` declaration —
+            # substitute `*` so the fallback still matches the glob.
+            fallback = pattern.replace("*", name) if "*" in pattern else name
             result[name] = next(
                 (f for f in recorded if fnmatch.fnmatch(f, pattern or "*")),
-                name,
+                fallback,
             )
     return result
 

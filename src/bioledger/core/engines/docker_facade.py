@@ -9,10 +9,12 @@ because Docker cannot fan-out (fan-out requires a real workflow engine).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from bioledger.core.containers.docker import DockerRunner
 from bioledger.core.engines.protocol import RunHandle, RunStatus, WorkflowHandle
+
+if TYPE_CHECKING:
+    from bioledger.core.containers.docker import DockerRunner
 
 
 class DockerRunnerFacade:
@@ -36,6 +38,9 @@ class DockerRunnerFacade:
     @property
     def runner(self) -> DockerRunner:
         if self._runner is None:
+            # Lazy import — the facade must be importable without the
+            # optional ``docker`` package installed.
+            from bioledger.core.containers.docker import DockerRunner
             self._runner = DockerRunner()
         return self._runner
 
