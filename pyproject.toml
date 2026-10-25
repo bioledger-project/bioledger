@@ -79,6 +79,7 @@ asyncio_mode = "auto"
 markers = [
     "integration: requires Docker daemon",
     "llm_eval: requires LLM API key (manual/nightly)",
+    "live: requires real engine binaries or live network access (opt-in)",
 ]
 
 [tool.ruff]

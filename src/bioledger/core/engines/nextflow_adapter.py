@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import shutil
-import subprocess
-import time
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,6 @@ from bioledger.core.engines.protocol import (
     RunHandle,
     RunStatus,
     WorkflowHandle,
-    _is_process_alive,
     build_output_patterns,
     parse_collection_value,
     split_collection_inputs,
@@ -63,6 +62,21 @@ def _parse_collection_value(value: str) -> tuple[str, str]:
     .. deprecated:: Use ``parse_collection_value`` from ``protocol`` directly.
     """
     return parse_collection_value(value)
+
+
+def _log_progress(run_handle: RunHandle) -> tuple[int, int]:
+    """Read (completed, total) process counts from a live run's log."""
+    log_path = Path(run_handle.work_dir) / "nextflow.log"
+    completed = 0
+    total = 0
+    if log_path.exists():
+        try:
+            content = log_path.read_text()
+            completed = content.count("Completed process")
+            total = max(completed, 1)
+        except Exception:
+            pass
+    return completed, total
 
 
 def _generate_nextflow_workflow(
@@ -288,6 +302,7 @@ class NextflowAdapter:
             executor_name="nextflow",
             engine_version=self._detect_version(),
             log_filename="nextflow.log",
+            spec=spec,
         )
 
     def generate(
@@ -304,8 +319,12 @@ class NextflowAdapter:
         """
         container_image = resolve_container_from_spec(spec)
 
-        import tempfile
-        artifact_path = Path(tempfile.gettempdir()) / f"bioledger_nextflow_{int(time.time())}.nf"
+        # Unique temporary artifact path — submit() writes it to work_dir.
+        # NamedTemporaryFile avoids the one-second-collision of time.time() names.
+        with tempfile.NamedTemporaryFile(
+            mode="w", prefix="bioledger_nextflow_", suffix=".nf", delete=False
+        ) as tf:
+            artifact_path = Path(tf.name)
 
         process_names, collection_inputs = _generate_nextflow_workflow(
             spec, input_mapping, container_image, artifact_path
@@ -367,71 +386,32 @@ class NextflowAdapter:
         cmd.extend(extra_args)
         cmd.extend(self._config.extra_args)
 
-        # Launch as subprocess (non-blocking)
-        log_path = work_dir / "nextflow.log"
-        log_file = open(log_path, "w")
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(work_dir),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        finally:
-            log_file.close()
+        # Launch as subprocess (non-blocking) via the shared shell wrapper —
+        # gets the .exit_code EXIT-trap sidecar for free.
+        from bioledger.core.engines._subprocess import launch_logged_process
 
-        run_id = str(proc.pid)
-
-        # Record process start time for PID recycling guard
-        process_start_time = None
-        try:
-            import psutil
-
-            process_start_time = psutil.Process(proc.pid).create_time()
-        except Exception:
-            pass
-
-        return RunHandle(
-            executor="nextflow",
-            run_id=run_id,
-            entry_id="",
+        return launch_logged_process(
+            shlex.join(cmd),
             work_dir=work_dir,
-            status="running",
-            process_start_time=process_start_time,
+            executor_name="nextflow",
+            log_filename="nextflow.log",
             metadata={"engine_version": self._detect_version()},
         )
 
     def poll(self, run_handle: RunHandle) -> RunStatus | None:
-        """Check if the nextflow subprocess is still running."""
-        try:
-            pid = int(run_handle.run_id)
-        except ValueError:
-            return None
+        """Check if the nextflow subprocess is still running.
 
-        if not _is_process_alive(pid, run_handle.process_start_time):
-            return self._check_completion(run_handle)
+        ``.exit_code`` (written by the launch wrapper's EXIT trap) is the
+        source of truth; ``_check_completion`` (nextflow.log grepping)
+        is the fallback for runs without a sidecar.
+        """
+        from bioledger.core.engines._subprocess import poll_local_process
 
-        # Still running — try to get progress from .nextflow.log
-        log_path = Path(run_handle.work_dir) / "nextflow.log"
-        completed = 0
-        total = 0
-        if log_path.exists():
-            try:
-                content = log_path.read_text()
-                # Count completed processes
-                completed = content.count("Completed process")
-                # Estimate total from the workflow declaration
-                # (rough heuristic: count unique process names)
-                total = max(completed, 1)
-            except Exception:
-                pass
-
-        return RunStatus(
-            state="running",
-            completed=completed,
-            total=total,
-            message="",
+        return poll_local_process(
+            run_handle,
+            log_filename="nextflow.log",
+            fallback_check=self._check_completion,
+            progress_fn=_log_progress,
         )
 
     def _check_completion(self, run_handle: RunHandle) -> RunStatus | None:

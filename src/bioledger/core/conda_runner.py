@@ -11,12 +11,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
 from bioledger.core.containers.docker import RunResult
+from bioledger.core.engines._subprocess import (
+    EXIT_CODE_ENV_VAR,
+    EXIT_CODE_FILENAME,
+)
 from bioledger.core.engines.protocol import _is_process_alive
 
 
@@ -44,6 +49,12 @@ def _env_name(conda_deps: list[str]) -> str:
 def _wrap_for_exit_code(command: list[str]) -> list[str]:
     """Wrap a command so the exit code is captured to ``.exit_code``.
 
+    Uses an EXIT trap rather than ``cmd; echo $?`` so the sidecar is
+    written even when the command ends with ``exit N`` or aborts under
+    ``set -e`` (which would skip a trailing echo). The sidecar path comes
+    from ``BIOLEDGER_EXIT_CODE_PATH`` in the environment, so quoting and
+    ``cd`` inside the command can't break it.
+
     ``_to_shell_command()`` upstream returns either a plain argv list or
     ``["sh", "-c", raw_string]``. For the shell-wrapped case, we unwrap and
     re-wrap the raw string directly to avoid double-nesting. For plain argv,
@@ -53,7 +64,8 @@ def _wrap_for_exit_code(command: list[str]) -> list[str]:
         raw = command[2]
     else:
         raw = shlex.join(command)
-    return ["sh", "-c", f"{raw}; echo $? > .exit_code"]
+    wrapped = f"trap 'echo $? > \"${EXIT_CODE_ENV_VAR}\"' EXIT\n{raw}"
+    return ["sh", "-c", wrapped]
 
 
 class CondaRunner:
@@ -107,6 +119,14 @@ class CondaRunner:
             *_wrap_for_exit_code(command),
         ]
 
+        # Remove a stale sentinel from a previous run in the same dir, and
+        # hand the fresh path to the trap via the environment.
+        exit_code_path = (workdir / EXIT_CODE_FILENAME).resolve()
+        exit_code_path.unlink(missing_ok=True)
+        merged_env = dict(os.environ)
+        merged_env.update(env or {})
+        merged_env[EXIT_CODE_ENV_VAR] = str(exit_code_path)
+
         stdout_f = open(workdir / "stdout.log", "w")
         stderr_f = open(workdir / "stderr.log", "w")
         try:
@@ -116,7 +136,7 @@ class CondaRunner:
                 stdout=stdout_f,
                 stderr=stderr_f,
                 start_new_session=True,
-                env=env,
+                env=merged_env,
             )
         finally:
             stdout_f.close()

@@ -194,19 +194,32 @@ def _stage_inputs(
     return {slot: staged_names[slot] for slot in input_files}
 
 
+def _is_under_excluded_dir(resolved_path: str, exclude_dirs: set) -> bool:
+    """True if a resolved path is inside any excluded directory."""
+    return any(
+        resolved_path == str(d) or resolved_path.startswith(str(d) + os.sep)
+        for d in exclude_dirs
+    )
+
+
 def _discover_outputs(
     spec: ToolSpec,
     run_dir: Path,
     pre_snapshot: dict[str, float],
     staged_input_paths: set[str],
     exclude_paths: set[str] | None = None,
+    exclude_dirs: set[str] | None = None,
 ) -> list[Path]:
     """Discover output files using declared output patterns + change detection.
 
     Returns paths of new/modified files matching any declared output pattern.
     Staged inputs (symlinks or copies) are excluded from the fallback to
-    prevent input files leaking into the output list.
+    prevent input files leaking into the output list. ``exclude_dirs``
+    (resolved absolute dir paths) skips whole subtrees — used for engine
+    work dirs (``work/``, ``.nextflow/``, ``.snakemake/``) and staged
+    companion-file directories.
     """
+    exclude_dirs = exclude_dirs or set()
     output_paths: list[Path] = []
     seen: set[str] = set()
 
@@ -226,6 +239,8 @@ def _discover_outputs(
                 continue
             if exclude_paths and key in exclude_paths:
                 continue
+            if _is_under_excluded_dir(key, exclude_dirs):
+                continue
             # Only include new/modified files
             if match.is_file():
                 old_mtime = pre_snapshot.get(key)
@@ -244,6 +259,8 @@ def _discover_outputs(
                         continue
                     if exclude_paths and child_key in exclude_paths:
                         continue
+                    if _is_under_excluded_dir(child_key, exclude_dirs):
+                        continue
                     output_paths.append(child)
                     seen.add(child_key)
 
@@ -259,6 +276,8 @@ def _discover_outputs(
             if key in staged_input_paths:
                 continue
             if exclude_paths and key in exclude_paths:
+                continue
+            if _is_under_excluded_dir(key, exclude_dirs):
                 continue
             old_mtime = pre_snapshot.get(key)
             if old_mtime is None or p.stat().st_mtime > old_mtime:

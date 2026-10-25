@@ -1,0 +1,13 @@
+rule samtools_sort:
+    input:
+        "mapped/{sample}.bam",
+    output:
+        "mapped/{sample}.sorted.bam",
+    log:
+        "logs/{sample}.log",
+    params:
+        mem="64G", # choose as required, the more the better
+        extra="",
+    threads: 8
+    wrapper:
+        "master/bio/samtools/sort"

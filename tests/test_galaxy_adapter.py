@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -105,90 +106,87 @@ class TestGalaxyToolAvailability:
 
 
 class TestGalaxyPoll:
-    def test_poll_planemo_invocation_completed(self):
-        """Planemo mode now uses bioblend to poll invocation state."""
-        adapter = GalaxyAdapter()  # default mode=planemo
-        mock_gi = MagicMock()
-        mock_gi.workflows.show_invocation.return_value = {"state": "done"}
-        with patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi):
-            handle = RunHandle(
-                executor="galaxy",
-                run_id="inv-123",
-                entry_id="",
-                work_dir=Path("/tmp"),
-            )
-            result = adapter.poll(handle)
-        assert result is not None
-        assert result.state == "completed"
-        mock_gi.workflows.show_invocation.assert_called_once_with("inv-123")
+    """poll() on submit_spec() runs — local planemo subprocesses polled
+    via the shared PID + .exit_code path."""
 
-    def test_poll_planemo_invocation_failed(self):
-        """Planemo mode polls invocation state via bioblend."""
+    def test_poll_returns_none_for_non_pid(self):
+        """Non-numeric run_id (e.g. a stray invocation ID) is a lost run."""
         adapter = GalaxyAdapter()
-        mock_gi = MagicMock()
-        mock_gi.workflows.show_invocation.return_value = {"state": "failed"}
-        with patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi):
-            handle = RunHandle(
-                executor="galaxy",
-                run_id="inv-456",
-                entry_id="",
-                work_dir=Path("/tmp"),
-            )
-            result = adapter.poll(handle)
-        assert result is not None
-        assert result.state == "failed"
+        handle = RunHandle(
+            executor="galaxy",
+            run_id="inv-123",
+            entry_id="",
+            work_dir=Path("/tmp"),
+        )
+        assert adapter.poll(handle) is None
 
-    def test_poll_planemo_invocation_running(self):
-        """Planemo mode polls invocation state via bioblend."""
+    def test_poll_running_process(self, tmp_path):
+        """A live PID reports running."""
         adapter = GalaxyAdapter()
-        mock_gi = MagicMock()
-        mock_gi.workflows.show_invocation.return_value = {"state": "running"}
-        with patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi):
-            handle = RunHandle(
-                executor="galaxy",
-                run_id="inv-789",
-                entry_id="",
-                work_dir=Path("/tmp"),
-            )
-            result = adapter.poll(handle)
+        handle = RunHandle(
+            executor="galaxy",
+            run_id=str(os.getpid()),
+            entry_id="",
+            work_dir=tmp_path,
+        )
+        result = adapter.poll(handle)
         assert result is not None
         assert result.state == "running"
 
-    def test_poll_remote_completed(self):
-        config = GalaxyEngineConfig(
-            mode="remote", url="http://galaxy.example", api_key=""
-        )
-        adapter = GalaxyAdapter(config)
-        mock_client = MagicMock()
-        mock_client.workflows.show_invocation.return_value = {"state": "done"}
-        adapter._bioblend_client = mock_client
+    def test_poll_completed_via_exit_code(self, tmp_path):
+        """A dead PID with .exit_code=0 reports completed."""
+        adapter = GalaxyAdapter()
+        (tmp_path / ".exit_code").write_text("0")
         handle = RunHandle(
             executor="galaxy",
-            run_id="invocation-123",
+            run_id="99999999",
             entry_id="",
-            work_dir=Path("/tmp"),
+            work_dir=tmp_path,
         )
         result = adapter.poll(handle)
         assert result is not None
         assert result.state == "completed"
 
-    def test_poll_remote_failed(self):
-        config = GalaxyEngineConfig(
-            mode="remote", url="http://galaxy.example", api_key=""
-        )
-        adapter = GalaxyAdapter(config)
-        mock_client = MagicMock()
-        mock_client.workflows.show_invocation.return_value = {"state": "failed"}
-        adapter._bioblend_client = mock_client
+    def test_poll_failed_via_exit_code(self, tmp_path):
+        """A dead PID with nonzero .exit_code reports failed."""
+        adapter = GalaxyAdapter()
+        (tmp_path / ".exit_code").write_text("2")
         handle = RunHandle(
             executor="galaxy",
-            run_id="invocation-123",
+            run_id="99999999",
             entry_id="",
-            work_dir=Path("/tmp"),
+            work_dir=tmp_path,
         )
         result = adapter.poll(handle)
         assert result is not None
         assert result.state == "failed"
+
+    def test_poll_failed_log_fallback(self, tmp_path):
+        """No .exit_code + error in galaxy.log → failed."""
+        adapter = GalaxyAdapter()
+        (tmp_path / "galaxy.log").write_text("Error: planemo blew up\n")
+        handle = RunHandle(
+            executor="galaxy",
+            run_id="99999999",
+            entry_id="",
+            work_dir=tmp_path,
+        )
+        result = adapter.poll(handle)
+        assert result is not None
+        assert result.state == "failed"
+
+    def test_poll_unknown_without_sidecar_or_log(self, tmp_path):
+        """No .exit_code and no log markers → unknown."""
+        adapter = GalaxyAdapter()
+        handle = RunHandle(
+            executor="galaxy",
+            run_id="99999999",
+            entry_id="",
+            work_dir=tmp_path,
+        )
+        result = adapter.poll(handle)
+        assert result is not None
+        assert result.state == "unknown"
 
 
 class TestGalaxyCollect:
@@ -290,6 +288,7 @@ class TestGalaxySubmitSpec:
                 "--input {{ inputs.input }} "
                 "--outdir {{ outputs._dir }}"
             ),
+            inputs={"input": _MockInput("input", collection=False)},
         )
         with (
             patch.object(adapter, "_detect_version", return_value="2.16.0"),

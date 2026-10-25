@@ -1,0 +1,1740 @@
+<tool id="bowtie2" name="Bowtie2" version="2.5.5+galaxy0" profile="23.0">
+    <description>- map reads against reference genome</description>
+    <macros/><xrefs>
+        <xref type="bio.tools">bowtie2</xref>
+    </xrefs>
+    <requirements>
+        <requirement type="package" version="2.5.5">bowtie2</requirement>
+        <requirement type="package" version="1.22.1">samtools</requirement>
+    </requirements>
+    <version_command>bowtie2 --version</version_command>
+    <command detect_errors="exit_code">
+## Use pipefail if available to quit with first non-zero exit code
+set -o | grep -q pipefail &amp;&amp; set -o pipefail;
+## prepare bowtie2 index
+#set index_path = ''
+#if str($reference_genome.source) == "history":
+    bowtie2-build --threads \${GALAXY_SLOTS:-4} '$reference_genome.own_file' genome &amp;&amp;
+    ln -s -f '$reference_genome.own_file' genome.fa &amp;&amp;
+    #set index_path = 'genome'
+#else:
+    #set index_path = $reference_genome.index.fields.path
+#end if
+
+## Link in the input files, so bowtie2 can tell their type
+
+#set compressed="False"
+#set reads_are_fastq = True
+#if str($library.type) == 'paired_collection':
+    #if $library.input_1.forward.is_of_type("fastq.gz", "fastqsanger.gz"):
+        #set read1 = "input_f.fastq.gz"
+        #set compressed = "GZ"
+    #else if $library.input_1.forward.is_of_type("fastq.bz2", "fastqsanger.bz2"):
+        #set read1 = "input_f.fastq.bz2"
+        #set compressed = "BZ2"
+    #else if $library.input_1.forward.is_of_type('fasta'):
+        #set reads_are_fastq = False
+        #set read1 = "input_f.fasta"
+    #else:
+        #set read1 = "input_f.fastq"
+    #end if
+    ln -f -s '${library.input_1.forward}' ${read1} &amp;&amp;
+
+    #if $library.input_1.reverse.is_of_type("fastq.gz", "fastqsanger.gz"):
+        #set read2 = "input_r.fastq.gz"
+        #set compressed = "GZ"
+    #else if $library.input_1.reverse.is_of_type("fastq.bz2", "fastqsanger.bz2"):
+        #set read2 = "input_r.fastq.bz2"
+        #set compressed = "BZ2"
+    #else if $library.input_1.reverse.is_of_type("fasta"):
+        #set read2 = "input_r.fasta"
+    #else:
+        #set read2 = "input_r.fastq"
+    #end if
+    ln -f -s '${library.input_1.reverse}' ${read2} &amp;&amp;
+#else:
+    #if $library.input_1.is_of_type("fastq.gz", "fastqsanger.gz"):
+        #set read1 = "input_f.fastq.gz"
+        #set compressed = "GZ"
+    #else if $library.input_1.is_of_type("fastq.bz2", "fastqsanger.bz2"):
+        #set read1 = "input_f.fastq.bz2"
+        #set compressed = "BZ2"
+    #else if $library.input_1.is_of_type("fasta"):
+        #set reads_are_fastq = False
+        #set read1 = "input_f.fasta"
+    #else:
+        #set read1 = "input_f.fastq"
+    #end if
+    ln -f -s '${library.input_1}' ${read1} &amp;&amp;
+#end if
+
+
+## compute number of threads to be used for bowtie2
+## the bowtie parameter -p specifies the number of alignment threads to use (in
+## addition to a control thread) # just using GALAXY_SLOTS will lead to
+## overcommiting ressources (in particular because there may be a samtools sort or view
+## running in parallel). 
+## for now we use one thread less than GALAXY_SLOTS
+THREADS=\${GALAXY_SLOTS:-4} &amp;&amp;
+if [ "\$THREADS" -gt 1 ]; then (( THREADS-- )); fi &amp;&amp;
+
+## execute bowtie2
+
+bowtie2
+
+## number of threads
+-p "\$THREADS"
+
+## index file path
+-x '$index_path'
+
+## Input reads are fasta?
+#if not reads_are_fastq:
+    -f
+#end if
+
+## Input reads
+#if str( $library.type ) == "single":
+    -U '${read1}'
+    #if str( $library.unaligned_file ) == "true":
+        #if $compressed == "GZ":
+            --un-gz 'unaligned_reads'
+        #else if $compressed == "BZ2":
+            --un-bz2 'unaligned_reads'
+        #else:
+            --un 'unaligned_reads'
+        #end if
+    #end if
+    #if str( $library.aligned_file ) == "true":
+        #if $compressed == "GZ":
+            --al-gz 'aligned_reads'
+        #else if $compressed == "BZ2":
+            --al-bz2 'aligned_reads'
+        #else:
+            --al 'aligned_reads'
+        #end if
+    #end if
+
+#else:
+    -1 '${read1}'
+    -2 '${read2}'
+    #if str( $library.unaligned_file ) == "true":
+        #if $compressed == "GZ":
+            --un-conc-gz 'unaligned_reads'
+        #else if $compressed == "BZ2":
+            --un-conc-bz2 'unaligned_reads'
+        #else:
+            --un-conc 'unaligned_reads'
+        #end if
+    #end if
+    #if str( $library.aligned_file ) == "true":
+        #if $compressed == "GZ":
+            --al-conc-gz 'aligned_reads'
+        #else if $compressed == "BZ2":
+            --al-conc-bz2 'aligned_reads'
+        #else:
+            --al-conc 'aligned_reads'
+        #end if
+    #end if
+    #if str( $library.paired_options.paired_options_selector ) == "yes":
+        -I ${library.paired_options.I}
+        -X ${library.paired_options.X}
+        ${library.paired_options.fr_rf_ff}
+        ${library.paired_options.no_mixed}
+        ${library.paired_options.no_discordant}
+        ${library.paired_options.dovetail}
+        ${library.paired_options.no_contain}
+        ${library.paired_options.no_overlap}
+    #end if
+#end if
+
+## Read group information.
+
+#def identifier_or_name($input1)
+    #if hasattr($input1, 'element_identifier')
+        #return $input1.element_identifier
+    #else
+        #return $input1.name.rstrip('.gz').rstrip('.fastq').rstrip('.fq').rstrip('.bz2')
+    #end if
+#end def
+
+#def clean(name)
+    #import re
+    #set $name_clean = re.sub('[^\w\-_\.]', '_', $name)
+    #return $name_clean
+#end def
+
+#def read_group_name_default($input1, $input2=None)
+    #if $input2 is None
+        #return $clean($identifier_or_name($input1))
+    #else
+        #import itertools
+        #set $input_name1 = $clean($identifier_or_name($input1))
+        #set $input_name2 = $clean($identifier_or_name($input2))
+        #set $common_prefix = ''.join([c[0] for c in itertools.takewhile(lambda x: all(x[0] == y for y in x), zip(*[$input_name1, $input_name2]))])
+        #if len($common_prefix) &gt; 3
+            #return $common_prefix
+        #else
+            #return $input_name1
+        #end if
+    #end if
+#end def
+
+#def format_read_group(prefix, value, quote='', arg='')
+    #if $value
+        #return $arg + $quote + $prefix + $value + $quote
+    #else
+        #return ''
+    #end if
+#end def
+
+#def rg_param(name)
+    #if $varExists("rg")
+        #return $rg.get($name, None)
+    #else
+        #return $getVar($name, None)
+    #end if
+#end def
+
+#set $use_rg = True
+    
+#if str( $library.type ) == "single":
+    #set $rg_auto_name = $read_group_name_default($library.input_1)
+#else
+    #set $rg_auto_name = $read_group_name_default($library.input_1)
+#end if
+
+#set $use_rg = str($rg.rg_selector) != "do_not_set"
+    
+
+#if $use_rg
+    #if $rg_param('read_group_id_conditional') is None
+        #set $rg_id = $rg_auto_name
+    #elif $rg_param('read_group_id_conditional').do_auto_name == "yes"
+        #set $rg_id = $rg_auto_name
+    #else
+        #set $rg_id = str($rg_param('read_group_id_conditional').ID)
+    #end if
+
+    #if $rg_param('read_group_sm_conditional') is None
+        #set $rg_sm = ''
+    #elif $rg_param('read_group_sm_conditional').do_auto_name == "yes"
+        #set $rg_sm = $rg_auto_name
+    #else
+        #set $rg_sm = str($rg_param('read_group_sm_conditional').SM)
+    #end if
+
+    #if $rg_param('PL')
+        #set $rg_pl = str($rg_param('PL'))
+    #else
+        #set $rg_pl = ''
+    #end if
+
+    #if $rg_param('read_group_lb_conditional') is None
+        #set $rg_lb = ''
+    #elif $rg_param('read_group_lb_conditional').do_auto_name == "yes"
+        #set $rg_lb = $rg_auto_name
+    #else
+        #set $rg_lb = str($rg_param('read_group_lb_conditional').LB)
+    #end if
+
+    #if $rg_param('CN')
+        #set $rg_cn = str($rg_param('CN'))
+    #else
+        #set $rg_cn = ''
+    #end if
+
+    #if $rg_param("DS")
+        #set $rg_ds = str($rg_param("DS"))
+    #else
+        #set $rg_ds = ''
+    #end if
+
+    #if $rg_param("DT")
+        #set $rg_dt = str($rg_param("DT"))
+    #else
+        #set $rg_dt = ''
+    #end if
+
+    #if $rg_param("FO")
+        #set $rg_fo = str($rg_param("FO"))
+    #else
+        #set $rg_fo = ''
+    #end if
+
+    #if $rg_param("KS")
+        #set $rg_ks = str($rg_param("KS"))
+    #else
+        #set $rg_ks = ''
+    #end if
+
+    #if $rg_param("PG")
+        #set $rg_pg = str($rg_param("PG"))
+    #else
+        #set $rg_pg = ''
+    #end if
+
+    #if $rg_param("PI") != None
+        #set $rg_pi = str($rg_param("PI"))
+    #else
+        #set $rg_pi = ''
+    #end if
+
+    #if $rg_param("PU")
+        #set $rg_pu = str($rg_param("PU"))
+    #else
+        #set $rg_pu = ''
+    #end if
+#end if
+    
+#if $use_rg
+  $format_read_group("", $rg_id, '"', arg='--rg-id ')
+  $format_read_group("SM:", $rg_sm, '"', arg='--rg ')
+  $format_read_group("PL:", $rg_pl, '"', arg='--rg ')
+  $format_read_group("LB:", $rg_lb, '"', arg='--rg ')
+  $format_read_group("CN:", $rg_cn, '"', arg='--rg ')
+  $format_read_group("DS:", $rg_ds, '"', arg='--rg ')
+  $format_read_group("DT:", $rg_dt, '"', arg='--rg ')
+  $format_read_group("FO:", $rg_fo, '"', arg='--rg ')
+  $format_read_group("KS:", $rg_ks, '"', arg='--rg ')
+  $format_read_group("PG:", $rg_pg, '"', arg='--rg ')
+  $format_read_group("PI:", $rg_pi, '"', arg='--rg ')
+  $format_read_group("PU:", $rg_pu, '"', arg='--rg ')
+#end if
+
+## Analysis type
+#if ( str( $analysis_type.analysis_type_selector ) == "simple" and str( $analysis_type.presets ) != "no_presets" ):
+    $analysis_type.presets
+#elif str( $analysis_type.analysis_type_selector ) == "full":
+    #if str( $analysis_type.input_options.input_options_selector ) == "yes":
+        --skip ${analysis_type.input_options.skip}
+        --qupto ${analysis_type.input_options.qupto}
+        --trim5 ${analysis_type.input_options.trim5}
+        --trim3 ${analysis_type.input_options.trim3}
+        ${analysis_type.input_options.qv_encoding}
+        ${analysis_type.input_options.solexa_quals}
+        ${analysis_type.input_options.int_quals}
+    #end if
+
+    #if str( $analysis_type.alignment_options.alignment_options_selector ) == "yes":
+        -N ${analysis_type.alignment_options.N}
+        -L ${analysis_type.alignment_options.L}
+        -i '${analysis_type.alignment_options.i}'
+        --n-ceil '${analysis_type.alignment_options.n_ceil}'
+        --dpad ${analysis_type.alignment_options.dpad}
+        --gbar ${analysis_type.alignment_options.gbar}
+        ${analysis_type.alignment_options.ignore_quals}
+        ${analysis_type.alignment_options.nofw}
+        ${analysis_type.alignment_options.norc}
+        ${analysis_type.alignment_options.no_1mm_upfront}
+        #if str( $analysis_type.alignment_options.align_mode.align_mode_selector ) == "end-to-end":
+            --end-to-end
+            --score-min '${analysis_type.alignment_options.align_mode.score_min_ete}'
+        #elif str( $analysis_type.alignment_options.align_mode.align_mode_selector ) == "local":
+            --local
+            --score-min '${analysis_type.alignment_options.align_mode.score_min_loc}'
+        #end if
+    #end if
+
+    #if str( $analysis_type.scoring_options.scoring_options_selector ) == "yes":
+        #if ( str( $analysis_type.alignment_options.alignment_options_selector ) == "yes" and str( $analysis_type.alignment_options.align_mode.align_mode_selector ) == "local" ):
+            --ma ${analysis_type.scoring_options.ma}
+        #end if
+        --mp '${analysis_type.scoring_options.mp}'
+        --np ${analysis_type.scoring_options.np}
+        --rdg ${analysis_type.scoring_options.rdg_read_open},${analysis_type.scoring_options.rdg_read_extend}
+        --rfg ${analysis_type.scoring_options.rfg_ref_open},${analysis_type.scoring_options.rfg_ref_extend}
+    #end if
+
+    #if str( $analysis_type.reporting_options.reporting_options_selector ) == "k":
+        -k ${analysis_type.reporting_options.k}
+    #elif str( $analysis_type.reporting_options.reporting_options_selector ) == "a":
+        -a
+    #end if
+
+    #if str( $analysis_type.effort_options.effort_options_selector ) == "yes":
+        -D ${analysis_type.effort_options.D}
+        -R ${analysis_type.effort_options.R}
+        ${analysis_type.effort_options.d}
+    #end if
+    #if str( $analysis_type.other_options.other_options_selector ) == "yes":
+        ${analysis_type.other_options.non_deterministic}
+        --seed ${analysis_type.other_options.seed}
+    #end if
+
+#elif str( $analysis_type.analysis_type_selector ) == "cline":
+    ${analysis_type.cline}
+#end if
+
+#if str( $sam_options.sam_options_selector ) == "yes":
+    ${sam_options.no_unal}
+    ${sam_options.omit_sec_seq}
+    ${sam_options.sam_no_qname_trunc}
+    ${sam_options.xeq}
+    ${sam_options.soft_clipped_unmapped_tlen}
+    ${sam_options.reorder}
+#end if
+
+## mapping stats (i.e. stderr from bowtie2)
+#if $save_mapping_stats
+    2&gt; &gt;(tee '$mapping_stats' &gt;&amp;2) 
+#end if
+
+## output file
+#if str( $sam_options.sam_options_selector ) == "no" or (str( $sam_options.sam_opt ) == "false" and str($sam_options.reorder) == ''):
+    ## Convert SAM output to sorted BAM
+    ## using the two pipe stages has the following effect
+    ## - mapping and sorting run in parallel, during this time sort produces
+    ##   presorted temporary files but does not produce output (hence
+    ##   view does not run)
+    ## - once mapping is finished sort will start to merge the temporary
+    ##   files (which should be fast also on a single thread) gives the
+    ##   sorted output to view which only compresses the files (now
+    ##   using full parallelism again)
+    | samtools sort -l 0 -T "\${TMPDIR:-.}" -O bam | samtools view --no-PG -O bam -@ \${GALAXY_SLOTS:-1} -o '$output'
+#else if $sam_options.reorder:
+    | samtools view --no-PG -b -o '$output' 
+#else:
+    &gt; '$output'
+#end if
+        </command>
+    <inputs>
+        
+        <conditional name="library">
+            <param name="type" type="select" label="Is this single or paired library">
+              <option value="single">Single-end</option>
+              <option value="paired_collection">Paired-end</option>
+            </param>
+            <when value="single">
+                <param name="input_1" format="fastqsanger,fastqsanger.gz,fastqsanger.bz2,fasta" type="data" label="FASTA/Q file" help="Must be of datatype &quot;fastqsanger&quot; or &quot;fasta&quot;"/>
+                <param name="unaligned_file" type="boolean" truevalue="true" falsevalue="false" checked="False" label="Write unaligned reads (in fastq format) to separate file(s)" help="--un/--un-conc (possibly with -gz or -bz2); This triggers --un parameter for single reads and --un-conc for paired reads"/>
+        <param name="aligned_file" type="boolean" truevalue="true" falsevalue="false" checked="False" label="Write aligned reads (in fastq format) to separate file(s)" help="--al/--al-conc (possibly with -gz or -bz2); This triggers --al parameter for single reads and --al-conc for paired reads"/>
+    </when>
+            <when value="paired_collection">
+                <param name="input_1" format="fastqsanger,fastqsanger.gz,fastqsanger.bz2,fasta" type="data_collection" collection_type="paired" label="FASTQ Paired Dataset" help="Must be of datatype &quot;fastqsanger&quot; or &quot;fasta&quot;"/>
+                <param name="unaligned_file" type="boolean" truevalue="true" falsevalue="false" checked="False" label="Write unaligned reads (in fastq format) to separate file(s)" help="--un/--un-conc (possibly with -gz or -bz2); This triggers --un parameter for single reads and --un-conc for paired reads"/>
+        <param name="aligned_file" type="boolean" truevalue="true" falsevalue="false" checked="False" label="Write aligned reads (in fastq format) to separate file(s)" help="--al/--al-conc (possibly with -gz or -bz2); This triggers --al parameter for single reads and --al-conc for paired reads"/>
+    <conditional name="paired_options">
+            <param name="paired_options_selector" type="select" label="Do you want to set paired-end options?" help="See &quot;Alignment Options&quot; section of Help below for information">
+                <option value="no" selected="True">No</option>
+                <option value="yes">Yes</option>
+            </param>
+            <when value="yes">
+                <param argument="-I" type="integer" value="0" min="0" label="Set the minimum fragment length for valid paired-end alignments" help="E.g. if `-I 60` is specified and a paired-end alignment consists of two 20-bp alignments in the appropriate orientation with a 20-bp gap between them, that alignment is considered valid (as long as `-X` is also satisfied).  A 19-bp gap would not be valid in that case.  If trimming options `-3` or `-5` are also used, the `-I` constraint is applied with respect to the untrimmed mates. The larger the difference between `-I` and `-X`, the slower Bowtie 2 will run.  This is because larger differences bewteen `-I` and `-X` require that Bowtie 2 scan a larger window to determine if a concordant alignment exists. For typical fragment length ranges (200 to 400 nucleotides), Bowtie 2 is very efficient. Default=0"/>
+                <param argument="-X" type="integer" value="500" min="0" label="Set the maximum fragment length for valid paired-end alignments" help="E.g. if `-X 100` is specified and a paired-end alignment consists of two 20-bp alignments in the proper orientation with a 60-bp gap between them, that alignment is considered valid (as long as `-I` is also satisfied).  A 61-bp gap would not be valid in that case.  If trimming options `-3` or `-5` are also used, the `-X` constraint is applied with respect to the untrimmed mates, not the trimmed mates; Default=500"/>
+                <param name="fr_rf_ff" type="select" display="radio" label="Select the upstream/downstream mate orientations for a valid paired-end alignment against the forward reference strand" help="--fr, --rf, or --ff; E.g., if `--fr` is specified and there is a candidate paired-end alignment where mate 1 appears upstream of the reverse complement of mate 2 and the fragment length constraints (`-I` and `-X`) are met, that alignment is valid.  Also, if mate 2 appears upstream of the reverse complement of mate 1 and all other constraints are met, that too is valid. `--rf` likewise requires that an upstream mate1 be reverse-complemented and a downstream mate2 be forward-oriented. `--ff` requires both an upstream mate 1 and a downstream mate 2 to be forward-oriented; Default=--fr (appropriate for Illumina's Paired-end Sequencing Assay)">
+                    <option value="--fr" selected="True">--fr</option>
+                    <option value="--rf">--rf</option>
+                    <option value="--ff">--ff</option>
+                </param>
+                <param argument="--no-mixed" type="boolean" truevalue="--no-mixed" falsevalue="" checked="False" label="Disable no-mixed behavior" help="--no-mixed; By default, when `bowtie2` cannot find a concordant or discordant alignment for a pair, it then tries to find alignments for the individual mates; default=False"/>
+                <param argument="--no-discordant" type="boolean" truevalue="--no-discordant" falsevalue="" checked="False" label="Disable no-discordant behavior" help="--no-discordant; By default, `bowtie2` looks for discordant alignments if it cannot find any concordant alignments. A discordant alignment is an alignment where both mates align uniquely, but that does not satisfy the paired-end constraints (`--fr`/`--rf`/`--ff`, `-I`, `-X`); default=False"/>
+                <param argument="--dovetail" type="boolean" truevalue="--dovetail" falsevalue="" checked="False" label="Allow mate dovetailing" help="--dovetail; If the mates `dovetail`, that is if one mate alignment extends past the beginning of the other such that the wrong mate begins upstream, consider that to be concordant. Default=False"/>
+                <param argument="--no-contain" type="boolean" truevalue="--no-contain" falsevalue="" checked="False" label="Disallow one mate alignment to contain another" help="--no-contain; If one mate alignment contains the other, consider that to be non-concordant. Default=False"/>
+                <param argument="--no-overlap" type="boolean" truevalue="--no-overlap" falsevalue="" checked="False" label="Disallow mate alignments to overlap" help="--no-overlap; If one mate alignment overlaps the other at all, consider that to be non-concordant. Default=False"/>
+            </when>
+            <when value="no">
+                
+            </when>
+        </conditional>
+    </when>
+        </conditional>
+        
+        <conditional name="reference_genome">
+          <param name="source" type="select" label="Will you select a reference genome from your history or use a built-in index?" help="Built-ins were indexed using default options. See `Indexes` section of help below">
+            <option value="indexed">Use a built-in genome index</option>
+            <option value="history">Use a genome from the history and build index</option>
+          </param>
+          <when value="indexed">
+            <param name="index" type="select" label="Select reference genome" help="If your genome of interest is not listed, contact the Galaxy team">
+              <options from_data_table="bowtie2_indexes">
+                <filter type="sort_by" column="2"/>
+                <validator type="no_options" message="No indexes are available for the selected input dataset"/>
+              </options>
+            </param>
+          </when>
+          <when value="history">
+            <param name="own_file" type="data" format="fasta" label="Select reference genome"/>
+          </when>
+        </conditional>
+        
+        <conditional name="rg">
+            <param name="rg_selector" type="select" label="Set read groups information?" help="Specifying read group information can greatly simplify your downstream analyses by allowing combining multiple datasets.">
+                <option value="set">Set read groups (SAM/BAM specification)</option>
+                <option value="set_picard">Set read groups (Picard style)</option>
+                <option value="set_id_auto">Automatically assign ID using name of history item(s)</option>
+                <option value="do_not_set" selected="True">Do not set</option>
+            </param>
+            <when value="set_picard">
+                <conditional name="read_group_id_conditional">
+            <param name="do_auto_name" type="select" optional="false" label="Auto-assign" help="Use dataset name or collection information to automatically assign this value">
+            <option value="yes">Yes</option>
+            <option value="no" selected="true">No</option>
+        </param>
+        <when value="yes"/>
+        <when value="no">
+            <param name="ID" type="text" value="" label="Read group identifier (ID)" help="This value must be unique among multiple samples in your experiment">
+            <validator type="empty_field"/>
+        </param>
+    </when>
+    </conditional>
+    <conditional name="read_group_sm_conditional">
+            <param name="do_auto_name" type="select" optional="false" label="Auto-assign" help="Use dataset name or collection information to automatically assign this value">
+            <option value="yes">Yes</option>
+            <option value="no" selected="true">No</option>
+        </param>
+        <when value="yes"/>
+        <when value="no">
+            <param name="SM" type="text" value="" label="Read group sample name (SM)" help="This value should be descriptive. Use pool name where a pool is being sequenced"/>
+    </when>
+    </conditional>
+    <conditional name="read_group_lb_conditional">
+            <param name="do_auto_name" type="select" optional="false" label="Auto-assign" help="Use dataset name or collection information to automatically assign this value">
+            <option value="yes">Yes</option>
+            <option value="no" selected="true">No</option>
+        </param>
+        <when value="yes"/>
+        <when value="no">
+            <param name="LB" type="text" label="Library name (LB)">
+            <validator type="empty_field"/>
+        </param>
+    </when>
+    </conditional>
+    <param name="PL" type="select" label="Platform/technology used to produce the reads (PL)">
+            <option value="CAPILLARY">CAPILLARY</option>
+            <option value="LS454">LS454</option>
+            <option selected="True" value="ILLUMINA">ILLUMINA</option>
+            <option value="SOLID">SOLID</option>
+            <option value="HELICOS">HELICOS</option>
+            <option value="IONTORRENT">IONTORRENT</option>
+            <option value="PACBIO">PACBIO</option>
+        </param>
+    <param name="PU" type="text" label="Platform unit (PU)" help="Unique identifier (e.g. flowcell-barcode.lane for Illumina or slide for SOLiD)"/>
+    <param name="CN" type="text" label="Sequencing center that produced the read (CN)"/>
+    <param name="DS" type="text" label="Description (DS)"/>
+    <param name="PI" type="integer" optional="true" label="Predicted median insert size (PI)"/>
+    <param name="DT" type="text" label="Date that run was produced (DT)" help="ISO8601 format date or date/time, like YYYY-MM-DD"/>
+    </when>
+            <when value="set">
+                <conditional name="read_group_id_conditional">
+            <param name="do_auto_name" type="select" optional="false" label="Auto-assign" help="Use dataset name or collection information to automatically assign this value">
+            <option value="yes">Yes</option>
+            <option value="no" selected="true">No</option>
+        </param>
+        <when value="yes"/>
+        <when value="no">
+            <param name="ID" type="text" value="" label="Read group identifier (ID)" help="This value must be unique among multiple samples in your experiment">
+            <validator type="empty_field"/>
+        </param>
+    </when>
+    </conditional>
+    <conditional name="read_group_sm_conditional">
+            <param name="do_auto_name" type="select" optional="false" label="Auto-assign" help="Use dataset name or collection information to automatically assign this value">
+            <option value="yes">Yes</option>
+            <option value="no" selected="true">No</option>
+        </param>
+        <when value="yes"/>
+        <when value="no">
+            <param name="SM" type="text" value="" label="Read group sample name (SM)" help="This value should be descriptive. Use pool name where a pool is being sequenced"/>
+    </when>
+    </conditional>
+    <param name="PL" type="select" label="Platform/technology used to produce the reads (PL)">
+            <option value="CAPILLARY">CAPILLARY</option>
+            <option value="LS454">LS454</option>
+            <option selected="True" value="ILLUMINA">ILLUMINA</option>
+            <option value="SOLID">SOLID</option>
+            <option value="HELICOS">HELICOS</option>
+            <option value="IONTORRENT">IONTORRENT</option>
+            <option value="PACBIO">PACBIO</option>
+        </param>
+    <conditional name="read_group_lb_conditional">
+            <param name="do_auto_name" type="select" optional="false" label="Auto-assign" help="Use dataset name or collection information to automatically assign this value">
+            <option value="yes">Yes</option>
+            <option value="no" selected="true">No</option>
+        </param>
+        <when value="yes"/>
+        <when value="no">
+            <param name="LB" type="text" label="Library name (LB)"/>
+    </when>
+    </conditional>
+    <param name="CN" type="text" label="Sequencing center that produced the read (CN)"/>
+    <param name="DS" type="text" label="Description (DS)"/>
+    <param name="DT" type="text" label="Date that run was produced (DT)" help="ISO8601 format date or date/time, like YYYY-MM-DD"/>
+    <param name="FO" type="text" label="Flow order (FO)" help="The array of nucleotide bases that correspond to the nucleotides used for each flow of each read. Multi-base flows are encoded in IUPAC format, and non-nucleotide flows by various other characters. Format: /\*|[ACMGRSVTWYHKDBN]+/">
+          <validator type="regex" message="Invalid flow order">|\*|[ACMGRSVTWYHKDBN]+$</validator>
+        </param>
+    <param name="KS" type="text" label="The array of nucleotide bases that correspond to the key sequence of each read (KS)"/>
+    <param name="PG" type="text" label="Programs used for processing the read group (PG)"/>
+    <param name="PI" type="integer" optional="true" label="Predicted median insert size (PI)"/>
+    <param name="PU" type="text" label="Platform unit (PU)" help="Unique identifier (e.g. flowcell-barcode.lane for Illumina or slide for SOLiD)"/>
+    </when>
+            <when value="set_id_auto"/>
+            <when value="do_not_set"/>
+        </conditional>
+    <conditional name="analysis_type">
+            <param name="analysis_type_selector" type="select" label="Select analysis mode">
+                <option value="simple">1: Default setting only</option>
+                <option value="full">2: Full parameter list</option>
+            </param>
+            <when value="simple">
+                <param name="presets" type="select" display="radio" label="Do you want to use presets?" help="Allow selecting among several preset parameter settings. Choosing between these will result in dramatic changes in runtime. See help below to understand effects of these presets.">
+                    <option value="no_presets" selected="True">No, just use defaults</option>
+                    <option value="--very-fast">Very fast end-to-end (--very-fast)</option>
+                    <option value="--fast">Fast end-to-end (--fast)</option>
+                    <option value="--sensitive">Sensitive end-to-end (--sensitive)</option>
+                    <option value="--very-sensitive">Very sensitive end-to-end (--very-sensitive)</option>
+                    <option value="--very-fast-local">Very fast local (--very-fast-local)</option>
+                    <option value="--fast-local">Fast local (--fast-local)</option>
+                    <option value="--sensitive-local">Sensitive local (--sensitive-local)</option>
+                    <option value="--very-sensitive-local">Very sensitive local (--very-sensitive-local)</option>
+                </param>
+            </when>
+            <when value="full">
+                <conditional name="input_options">
+                    <param name="input_options_selector" type="select" label="Do you want to tweak input options?" help="See &quot;Input Options&quot; section of Help below for information">
+                        <option value="yes">Yes</option>
+                        <option value="no" selected="true">No</option>
+                    </param>
+                    <when value="yes">
+                        <param name="skip" type="integer" min="0" value="0" label="Skip (i.e. do not align) the first that many reads or pairs in the input" help="-s/--skip; default=0"/>
+                        <param name="qupto" type="integer" min="1" value="100000000" label="Align the first that many reads or read pairs from the input (after the -s/--skip reads or pairs have been skipped), then stop" help="-u/--qupto; for default behavior (no limit) leave this value very large"/>
+                        <param name="trim5" type="integer" min="0" value="0" label="Trim that many bases from 5' (left) end of each read before alignment" help="-5/--trim5; default=0"/>
+                        <param name="trim3" type="integer" min="0" value="0" label="Trim that many bases from 3' (right) end of each read before alignment" help="-3/--trim3; default=0"/>
+                        <param name="qv_encoding" type="select" display="radio" label="Select quality score encoding" help="See help below for more details">
+                            <option value="--phred33" selected="True">Input qualities are ASCII chars equal to the Phred quality plus 33. This is also called the "Phred+33" encoding, which is used by the very latest Illumina pipelines (--phred33)</option>
+                            <option value="--phred64">Input qualities are ASCII chars equal to the Phred quality plus 64. This is also called the "Phred+64" encoding (--phred64)</option>
+                        </param>
+                        <param name="solexa_quals" type="boolean" truevalue="--solexa-quals" falsevalue="" checked="False" label="Convert input qualities from Solexa (which can be negative) to Phred (which can't). This scheme was used in older Illumina GA Pipeline versions (prior to 1.3)" help="--solexa-quals; default=False"/>
+                        <param name="int_quals" type="boolean" truevalue="--int-quals" falsevalue="" checked="False" label="Quality values are represented in the read input file as space-separated ASCII integers, e.g., 40 40 30 40..., rather than ASCII characters, e.g., II?I.... Integers are treated as being on the Phred quality scale unless --solexa-quals is also specified" help="--int-quals; default=False"/>
+                    </when>
+                    <when value="no">
+                        
+                    </when>
+                </conditional>
+                <conditional name="alignment_options">
+                    <param name="alignment_options_selector" type="select" label="Do you want to tweak alignment options?" help="See &quot;Alignment Options&quot; section of Help below for information">
+                        <option value="yes">Yes</option>
+                        <option value="no" selected="true">No</option>
+                    </param>
+                    <when value="yes">
+                        <param name="N" type="integer" min="0" max="1" value="0" label="Set the number of mismatches to be allowed in a seed alignment during multiseed alignment (see `Multiseed alignment` section of help below)" help="-N; Can be set to 0 or 1. Setting this higher makes alignment slower (often much slower) but increases sensitivity; default=0"/>
+                        <param name="L" type="integer" min="0" max="32" value="22" label="Sets the length of the seed substrings to align during multiseed alignment (see `Multiseed alignment` section of help below)" help="-L; Smaller values make alignment slower but more sensitive. Default=22"/>
+                        <param name="i" type="text" value="S,1,1.15" label="Set a function governing the interval between seed substrings to use during multiseed alignment (see `Multiseed alignment` section of help below). Also see description of this option below in the help section" help="-i; Since it's best to use longer intervals for longer reads, this parameter sets the interval as a function of the read length, rather than a single one-size-fits-all number. For instance, specifying `-i S,1,2.5` sets the interval function `f` to `f(x) = 1 + 2.5 * sqrt(x)`, where x is the read length. If the function returns a result less than 1, it is rounded up to 1. Default=`S,1,1.15`"/>
+                        <param name="n_ceil" type="text" value="L,0,0.15" label="Set a function governing the maximum number of ambiguous characters (usually `N`s and/or `.`s) allowed in a read as a function of read length" help="--n-ceil; For instance, specifying `L,0,0.15` sets the N-ceiling function `f` to `f(x) = 0 + 0.15 * x`, where x is the read length. Reads exceeding this ceiling are filtered out. Default=`L,0,0.15`"/>
+                        <param name="dpad" type="integer" min="0" value="15" label="Pad dynamic programming problems by that many columns on either side to allow gaps" help="--dpad; default=15"/>
+                        <param name="gbar" type="integer" min="0" value="4" label="Disallow gaps within that many positions of the beginning or end of the read" help="--gbar; default=4"/>
+                        <param name="ignore_quals" type="boolean" truevalue="--ignore-quals" falsevalue="" label="When calculating a mismatch penalty, always consider the quality value at the mismatched position to be the highest possible, regardless of the actual value" help="--ignore-quals; input is treated as though all quality values are high; default=False"/>
+                        <param name="nofw" type="boolean" truevalue="--nofw" falsevalue="" label="Do not attempt to align unpaired reads to the forward (Watson) reference strand" help="In paired-end mode, `--nofw` and `--norc` pertain to the fragments; i.e. specifying `--nofw` causes `bowtie2` to explore only those paired-end configurations corresponding to fragments from the reverse-complement (Crick) strand. Default=False"/>
+                        <param name="norc" type="boolean" truevalue="--norc" falsevalue="" label="Do not attempt to align unpaired reads to the reverse (Crick) reference strand" help="In paired-end mode, `--nofw` and `--norc` pertain to the fragments; i.e. specifying `--nofw` causes `bowtie2` to explore only those paired-end configurations corresponding to fragments from the reverse-complement (Crick) strand. Default=False"/>
+                        <param name="no_1mm_upfront" type="boolean" truevalue="--no-1mm-upfront" falsevalue="" label="Prevent searching for 1-mismatch end-to-end alignments before using the multiseed heuristic (see `Multiseed alignment` section of help below)" help="--no-1mm-upfront; By default, Bowtie 2 will attempt to find either an exact or a 1-mismatch end-to-end alignment for the read *before* trying the multiseed heuristic.  Such alignments can be found very quickly, and many short read alignments have exact or near-exact end-to-end alignments.  However, this can lead to unexpected alignments when the user also sets options governing the multiseed heuristic, like `-L` and `-N`.  For instance, if the user specifies `-N 0` and `-L` equal to the length of the read, the user will be surprised to find 1-mismatch alignments reported.  This option prevents Bowtie 2 from searching for 1-mismatch end-to-end alignments before using the multiseed heuristic, which leads to the expected behavior when combined with options such as `-L` and `-N`. This comes at the expense of speed; Default=False"/>
+                        <conditional name="align_mode">
+                            <param name="align_mode_selector" type="select" display="radio" label="Select between `--local` and `--end-to-end` alignment modes" help="--local and --end-to-end; see help below for detailed explanation; default=--end-to-end">
+                                <option value="end-to-end" selected="True">End to End (--end-to-end)</option>
+                                <option value="local">Local (--local)</option>
+                            </param>
+                            <when value="end-to-end">
+                                <param name="score_min_ete" type="text" value="L,-0.6,-0.6" label="Set a function governing the minimum alignment score needed for an alignment to be considered `valid` (i.e. good enough to report)" help="--score-min; This is a function of read length. For instance, specifying `L,0,-0.6` sets the minimum-score function `f` to `f(x) = 0 + -0.6 * x`, where `x` is the read length. The default in `--end-to-end` mode is `L,-0.6,-0.6` and the default in `--local` mode is `G,20,8`"/>
+                            </when>
+                            <when value="local">
+                                <param name="score_min_loc" type="text" value="G,20,8" label="Set a function governing the minimum alignment score needed for an alignment to be considered `valid` (i.e. good enough to report)" help="--score-min; This is a function of read length. For instance, specifying `L,0,-0.6` sets the minimum-score function `f` to `f(x) = 0 + -0.6 * x`, where `x` is the read length. The default in `--end-to-end` mode is `L,-0.6,-0.6` and the default in `--local` mode is `G,20,8`"/>
+                            </when>
+                        </conditional>
+                    </when>
+                    <when value="no">
+                        
+                    </when>
+                </conditional>
+                <conditional name="scoring_options">
+                    <param name="scoring_options_selector" type="select" label="Do you want to tweak scoring options?" help="See &quot;Scoring Options&quot; section of Help below for information">
+                        <option value="yes">Yes</option>
+                        <option value="no" selected="true">No</option>
+                    </param>
+                    <when value="yes">
+                        <param name="ma" type="integer" value="2" label="Set the match bonus" help="--ma;  In `--local` mode match bonus is added to the alignment score for each position where a read character aligns to a reference character and the characters match. Not used in `--end-to-end` mode; Default=2"/>
+                        <param name="mp" type="text" value="6,2" label="Set the maximum (`MX`) and minimum (`MN`) mismatch penalties, both integers" help="--mp; A number less than or equal to `MX` and greater than or equal to `MN` is subtracted from the alignment score for each position where a read character aligns to a reference character, the characters do not match, and neither is an `N`.  If `--ignore-quals` is specified, the number subtracted quals `MX`. Otherwise, the number subtracted is `MN + floor( (MX-MN)(MIN(Q, 40.0)/40.0) )` where Q is the Phred quality value; Default=6,2"/>
+                        <param name="np" type="integer" value="1" label="Sets penalty for positions where the read, reference, or both, contain an ambiguous character such as `N`" help="--np; Default=1"/>
+                        <param name="rdg_read_open" type="integer" value="5" label="Set the read gap opening penalty" help="--rdg; this is the first component of --rdg flag - opening penalty; Default=5"/>
+                        <param name="rdg_read_extend" type="integer" value="3" label="Set the read gap extension penalty" help="--rdg; this is the second component of --rdg flag - extension penalty; Default=3"/>
+                        <param name="rfg_ref_open" type="integer" value="5" label="Set the reference gap opening penalty" help="--rfg; this is the first component of --rfg flag - opening penalty; Default=5"/>
+                        <param name="rfg_ref_extend" type="integer" value="3" label="Set the reference gap extension penalty" help="--rfg; this is the second component of --rfg flag - extension penalty; Default=3"/>
+                    </when>
+                    <when value="no">
+                        
+                    </when>
+                </conditional>
+                <conditional name="reporting_options">
+                    <param name="reporting_options_selector" type="select" label="Do you want to use -a or -k options" help="Make sure you understand implications of setting -k and -a. See &quot;Reporting Options&quot; section of Help below for information on -k and -a options">
+                        <option value="no" selected="true">No, do not set</option>
+                        <option value="k">Set -k option and enter -k value</option>
+                        <option value="a">Set -a option</option>
+                    </param>
+                    <when value="no">
+                        
+                    </when>
+                    <when value="k">
+                        <param name="k" type="integer" min="1" value="1" label="Searches for at most that many distinct, valid alignments for each read" help="-k; see detailed description of this option in the help section below. Note: Bowtie 2 is not designed with large values for `-k` in mind, and when aligning reads to long, repetitive genomes large `-k` can be very, very slow"/>
+                    </when>
+                    <when value="a">
+                        
+                    </when>
+                </conditional>
+                <conditional name="effort_options">
+                    <param name="effort_options_selector" type="select" label="Do you want to tweak effort options?" help="See &quot;Effort Options&quot; section of Help below for information">
+                        <option value="yes">Yes</option>
+                        <option value="no" selected="true">No</option>
+                    </param>
+                    <when value="yes">
+                        <param name="D" type="integer" value="15" min="0" label="Attempt that many consecutive seed extension attempts to `fail` before Bowtie 2 moves on, using the alignments found so far" help="-D; A seed extension `fails` if it does not yield a new best or a new second-best alignment.  This limit is automatically adjusted up when -k or -a are specified. Default=15"/>
+                        <param name="R" type="integer" value="2" min="0" label="Set the maximum number of times Bowtie 2 will `re-seed` reads with repetitive seeds" help="When `re-seeding`, Bowtie 2 simply chooses a new set of reads (same length, same number of mismatches allowed) at different offsets and searches for more alignments.  A read is considered to have repetitive seeds if the total number of seed hits divided by the number of seeds that aligned at least once is greater than 300.  Default=2"/>
+                        <param argument="-d" type="boolean" truevalue="-d" falsevalue="" label="Consider all seeds in order (no subsampling)" help="Can be used to augment -a or -k with deterministic behavior. This option significantly speeds up -a while also reducing memory consumption."/>
+                    </when>
+                    <when value="no">
+                        
+                    </when>
+                </conditional>
+                <conditional name="other_options">
+                    <param name="other_options_selector" type="select" label="Do you want to tweak Other Options?" help="See &quot;Other Options&quot; section of Help below for information">
+                        <option value="yes">Yes</option>
+                        <option value="no" selected="true">No</option>
+                    </param>
+                    <when value="yes">
+                        <param name="seed" type="integer" value="0" min="0" label="Use this number as the seed for pseudo-random number generator" help="--seed; Default=0"/>
+                        <param name="non_deterministic" type="boolean" truevalue="--non-deterministic" falsevalue="" label="Re-initialize the pseudo-random generator for each read using the current time" help="--non-deterministic; see Help below for explanation of this option; default=False"/>
+                    </when>
+                    <when value="no">
+                        
+                    </when>
+                </conditional>
+            </when>
+        </conditional>
+        <conditional name="sam_options">
+            <param name="sam_options_selector" type="select" label="Do you want to tweak SAM/BAM Options?" help="See &quot;Output Options&quot; section of Help below for information">
+                <option value="yes">Yes</option>
+                <option value="no" selected="true">No</option>
+            </param>
+            <when value="yes">
+                <param name="sam_opt" type="boolean" truevalue="true" falsevalue="false" label="Would you like the output to be a SAM file" help="By default, the output from this Bowtie2 wrapper is a sorted BAM file."/>
+                <param argument="--no-unal" type="boolean" truevalue="--no-unal" falsevalue="" label="Suppress SAM records for reads that failed to align" help="--no-unal; Default=False"/>
+                <param argument="--omit-sec-seq" type="boolean" truevalue="--omit-sec-seq" falsevalue="" label="Suppress SEQ and QUAL strings for secondary alignments" help="--omit-sec-seq; Default=False"/>
+                <param argument="--sam-no-qname-trunc" type="boolean" truevalue="--sam-no-qname-trunc" falsevalue="" label="Suppress standard behavior of truncating readname at first whitespace at the expense of generating non-standard SAM"/>
+                <param argument="--xeq" type="boolean" truevalue="--xeq" falsevalue="" label="Use '='/'X', instead of 'M,' to specify matches/mismatches in SAM record."/>
+                <param argument="--soft-clipped-unmapped-tlen" type="boolean" truevalue="--soft-clipped-unmapped-tlen" falsevalue="" label=" Exclude soft-clipped bases when reporting TLEN"/>
+                <param argument="--reorder" type="boolean" truevalue="--reorder" falsevalue="" label="Reorder output to reflect order of the input file" help="Reorder guarantees that output SAM records are printed in an order corresponding to the order of the reads in the original input file, even when -p is set greater than 1."/>
+            </when>
+            <when value="no"/>
+        </conditional>
+        <param name="save_mapping_stats" type="boolean" checked="False" label="Save the bowtie2 mapping statistics to the history"/>
+    </inputs>
+    
+    <outputs>
+        <data name="output_unaligned_reads" format_source="library|input_1" from_work_dir="unaligned_reads" label="${tool.name} on ${on_string}: unaligned reads">
+            <filter>library['type'] == 'single' and library['unaligned_file'] is True</filter>
+            <actions>
+                <conditional name="reference_genome.source">
+            <when value="indexed">
+                <action type="metadata" name="dbkey">
+                     <option type="from_data_table" name="bowtie2_indexes" column="1">
+                        <filter type="param_value" ref="reference_genome.index" column="0"/>
+                    </option>
+                </action>
+            </when>
+            <when value="history">
+                <action type="metadata" name="dbkey">
+                    <option type="from_param" name="reference_genome.own_file" param_attribute="dbkey"/>
+                </action>
+            </when>
+        </conditional>
+    </actions>
+        </data>
+        <collection name="output_unaligned_read_pairs" type="paired" label="${tool.name} on ${on_string}: unaligned read pairs">
+            <filter>library['type'] != 'single' and library['unaligned_file'] is True</filter>
+            <data name="forward" from_work_dir="unaligned_reads.1" format_source="library|input_1['forward']">
+                <actions>
+                    <conditional name="reference_genome.source">
+            <when value="indexed">
+                <action type="metadata" name="dbkey">
+                     <option type="from_data_table" name="bowtie2_indexes" column="1">
+                        <filter type="param_value" ref="reference_genome.index" column="0"/>
+                    </option>
+                </action>
+            </when>
+            <when value="history">
+                <action type="metadata" name="dbkey">
+                    <option type="from_param" name="reference_genome.own_file" param_attribute="dbkey"/>
+                </action>
+            </when>
+        </conditional>
+    </actions>
+            </data>
+            <data name="reverse" from_work_dir="unaligned_reads.2" format_source="library|input_1['reverse']">
+                <actions>
+                    <conditional name="reference_genome.source">
+            <when value="indexed">
+                <action type="metadata" name="dbkey">
+                     <option type="from_data_table" name="bowtie2_indexes" column="1">
+                        <filter type="param_value" ref="reference_genome.index" column="0"/>
+                    </option>
+                </action>
+            </when>
+            <when value="history">
+                <action type="metadata" name="dbkey">
+                    <option type="from_param" name="reference_genome.own_file" param_attribute="dbkey"/>
+                </action>
+            </when>
+        </conditional>
+    </actions>
+            </data>
+        </collection>
+
+        <data name="output_aligned_reads" format_source="library|input_1" from_work_dir="aligned_reads" label="${tool.name} on ${on_string}: aligned reads">
+            <filter>library['type'] == 'single' and library['aligned_file'] is True</filter>
+            <actions>
+                <conditional name="reference_genome.source">
+            <when value="indexed">
+                <action type="metadata" name="dbkey">
+                     <option type="from_data_table" name="bowtie2_indexes" column="1">
+                        <filter type="param_value" ref="reference_genome.index" column="0"/>
+                    </option>
+                </action>
+            </when>
+            <when value="history">
+                <action type="metadata" name="dbkey">
+                    <option type="from_param" name="reference_genome.own_file" param_attribute="dbkey"/>
+                </action>
+            </when>
+        </conditional>
+    </actions>
+        </data>
+        <collection name="output_aligned_read_pairs" type="paired" label="${tool.name} on ${on_string}: aligned read pairs">
+            <filter>library['type'] != 'single' and library['aligned_file'] is True</filter>
+            <data name="forward" from_work_dir="aligned_reads.1" format_source="library|input_1['forward']">
+                <actions>
+                    <conditional name="reference_genome.source">
+            <when value="indexed">
+                <action type="metadata" name="dbkey">
+                     <option type="from_data_table" name="bowtie2_indexes" column="1">
+                        <filter type="param_value" ref="reference_genome.index" column="0"/>
+                    </option>
+                </action>
+            </when>
+            <when value="history">
+                <action type="metadata" name="dbkey">
+                    <option type="from_param" name="reference_genome.own_file" param_attribute="dbkey"/>
+                </action>
+            </when>
+        </conditional>
+    </actions>
+            </data>
+            <data name="reverse" from_work_dir="aligned_reads.2" format_source="library|input_1['forward']">
+                <actions>
+                    <conditional name="reference_genome.source">
+            <when value="indexed">
+                <action type="metadata" name="dbkey">
+                     <option type="from_data_table" name="bowtie2_indexes" column="1">
+                        <filter type="param_value" ref="reference_genome.index" column="0"/>
+                    </option>
+                </action>
+            </when>
+            <when value="history">
+                <action type="metadata" name="dbkey">
+                    <option type="from_param" name="reference_genome.own_file" param_attribute="dbkey"/>
+                </action>
+            </when>
+        </conditional>
+    </actions>
+            </data>
+        </collection>
+
+        <data name="output" format="bam" label="${tool.name} on ${on_string}: alignments">
+          <change_format>
+              <when input="sam_options.reorder" value="--reorder" format="qname_input_sorted.bam"/>
+              <when input="sam_options.sam_opt" value="true" format="sam"/>
+          </change_format>
+          <actions>
+            <conditional name="reference_genome.source">
+              <when value="indexed">
+                <action type="metadata" name="dbkey">
+                  <option type="from_data_table" name="bowtie2_indexes" column="1" offset="0">
+                    <filter type="param_value" column="0" value="#" compare="startswith" keep="False"/>
+                    <filter type="param_value" ref="reference_genome.index" column="0"/>
+                  </option>
+                </action>
+              </when>
+              <when value="history">
+                <action type="metadata" name="dbkey">
+                  <option type="from_param" name="reference_genome.own_file" param_attribute="dbkey"/>
+                </action>
+              </when>
+            </conditional>
+            <conditional name="reference_genome.source">
+            <when value="indexed">
+                <action type="metadata" name="dbkey">
+                     <option type="from_data_table" name="bowtie2_indexes" column="1">
+                        <filter type="param_value" ref="reference_genome.index" column="0"/>
+                    </option>
+                </action>
+            </when>
+            <when value="history">
+                <action type="metadata" name="dbkey">
+                    <option type="from_param" name="reference_genome.own_file" param_attribute="dbkey"/>
+                </action>
+            </when>
+        </conditional>
+    </actions>
+        </data>
+        <data format="txt" name="mapping_stats" label="${tool.name} on ${on_string}: mapping stats">
+          <filter>save_mapping_stats is True</filter>
+          <actions>
+            <conditional name="reference_genome.source">
+            <when value="indexed">
+                <action type="metadata" name="dbkey">
+                     <option type="from_data_table" name="bowtie2_indexes" column="1">
+                        <filter type="param_value" ref="reference_genome.index" column="0"/>
+                    </option>
+                </action>
+            </when>
+            <when value="history">
+                <action type="metadata" name="dbkey">
+                    <option type="from_param" name="reference_genome.own_file" param_attribute="dbkey"/>
+                </action>
+            </when>
+        </conditional>
+    </actions>
+        </data>
+    </outputs>
+    <tests>
+        
+        <test expect_num_outputs="2">
+            <conditional name="library">
+                <param name="type" value="single"/>
+                <param name="unaligned_file" value="true"/>
+                <param name="input_1" value="bowtie2-fq1.fq" ftype="fastqsanger"/>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="history"/>
+                <param name="own_file" value="bowtie2-ref.fasta"/>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+            <output name="output_unaligned_reads" ftype="fastqsanger">
+                <assert_contents>
+                    <has_n_lines n="312"/>
+                </assert_contents>
+            </output>
+            <output name="output" file="bowtie2-single.bam" ftype="bam" lines_diff="4" sort="true">
+                <metadata name="sort_order" value="coordinate"/>
+            </output>
+        </test>
+        
+        <test expect_num_outputs="1">
+            <conditional name="library">
+                <param name="type" value="paired_collection"/>
+                <conditional name="paired_options">
+                    <param name="paired_options_selector" value="no"/>
+                </conditional>
+                <param name="unaligned_file" value="false"/>
+                <param name="input_1">
+                    <collection type="paired">
+                        <element name="forward" value="bowtie2-fq1.fq" ftype="fastqsanger"/>
+                        <element name="reverse" value="bowtie2-fq2.fq" ftype="fastqsanger"/>
+                    </collection>
+                </param>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="history"/>
+                <param name="own_file" value="bowtie2-ref.fasta"/>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+            <output name="output" file="bowtie2-test1.bam" ftype="bam" lines_diff="4" sort="true">
+                <metadata name="sort_order" value="coordinate"/>
+            </output>
+        </test>
+        
+        <test expect_num_outputs="4">
+            <conditional name="library">
+                <param name="type" value="paired_collection"/>
+                <conditional name="paired_options">
+                    <param name="paired_options_selector" value="no"/>
+                </conditional>
+                <param name="unaligned_file" value="true"/>
+                <param name="input_1">
+                    <collection type="paired">
+                        <element name="forward" value="bowtie2-fq1.fq" ftype="fastqsanger"/>
+                        <element name="reverse" value="bowtie2-fq2.fq" ftype="fastqsanger"/>
+                    </collection>
+                </param>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="history"/>
+                <param name="own_file" value="bowtie2-ref.fasta"/>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+            <output_collection name="output_unaligned_read_pairs" type="paired">
+                <element name="forward" ftype="fastqsanger">
+                    <assert_contents>
+                        <has_n_lines n="388"/>
+                    </assert_contents>
+                </element>
+                <element name="reverse" ftype="fastqsanger">
+                    <assert_contents>
+                        <has_n_lines n="388"/>
+                    </assert_contents>
+                </element>
+            </output_collection>
+            <output name="output" file="bowtie2-test1.bam" ftype="bam" lines_diff="4" sort="true">
+                <metadata name="sort_order" value="coordinate"/>
+            </output>
+        </test>
+        <test expect_num_outputs="1">
+            
+            <conditional name="library">
+                <param name="type" value="paired_collection"/>
+                <conditional name="paired_options">
+                    <param name="paired_options_selector" value="no"/>
+                </conditional>
+                <param name="unaligned_file" value="false"/>
+                <param name="input_1">
+                    <collection type="paired">
+                        <element name="forward" value="bowtie2-fq1.fq" ftype="fastqsanger"/>
+                        <element name="reverse" value="bowtie2-fq2.fq" ftype="fastqsanger"/>
+                    </collection>
+                </param>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="history"/>
+                <param name="own_file" value="bowtie2-ref.fasta"/>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+            <conditional name="sam_options">
+                <param name="sam_options_selector" value="yes"/>
+                <param name="sam_opt" value="true"/>
+            </conditional>
+            <conditional name="rg">
+                <param name="rg_selector" value="set"/>
+                <conditional name="read_group_id_conditional">
+                    <param name="do_auto_name" value="no"/>
+                    <param name="ID" value="rg1"/>
+                </conditional>
+                <param name="PL" value="CAPILLARY"/>
+            </conditional>
+            <output name="output" ftype="sam" lines_diff="4" sort="true">
+                <metadata name="sort_order" value="unsorted"/>
+                <assert_contents>
+                    <has_line line="@RG&#9;ID:rg1&#9;PL:CAPILLARY"/>
+                    <has_text text="RG:Z:rg1" n="200"/>
+                </assert_contents>
+            </output>
+        </test>
+        
+        <test expect_num_outputs="2">
+            <conditional name="library">
+                <param name="type" value="paired_collection"/>
+                <conditional name="paired_options">
+                    <param name="paired_options_selector" value="no"/>
+                </conditional>
+                <param name="unaligned_file" value="false"/>
+                <param name="input_1">
+                    <collection type="paired">
+                        <element name="forward" value="bowtie2-fq1.fq" ftype="fastqsanger"/>
+                        <element name="reverse" value="bowtie2-fq2.fq" ftype="fastqsanger"/>
+                    </collection>
+                </param>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="history"/>
+                <param name="own_file" value="bowtie2-ref.fasta"/>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+            <param name="save_mapping_stats" value="true"/>
+            <output name="output" file="bowtie2-test1.bam" ftype="bam" lines_diff="4" sort="true">
+                <metadata name="sort_order" value="coordinate"/>
+            </output>
+            <output name="mapping_stats">
+                <assert_contents>
+                    <has_text text="of these"/>
+                </assert_contents>
+            </output>
+        </test>
+        
+        <test expect_num_outputs="4">
+            <conditional name="library">
+                <param name="type" value="paired_collection"/>
+                <conditional name="paired_options">
+                    <param name="paired_options_selector" value="no"/>
+                </conditional>
+                <param name="unaligned_file" value="true"/>
+                <param name="input_1">
+                    <collection type="paired">
+                        <element name="forward" value="bowtie2-fq1.fq.gz" ftype="fastqsanger.gz"/>
+                        <element name="reverse" value="bowtie2-fq2.fq.gz" ftype="fastqsanger.gz"/>
+                    </collection>
+                </param>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="indexed"/>
+                <param name="index" value="test_value"/>
+            </conditional>
+            <output name="output" file="bowtie2-test1.bam" ftype="bam" lines_diff="4" sort="true">
+                <metadata name="sort_order" value="coordinate"/>
+            </output>
+            <output_collection name="output_unaligned_read_pairs" type="paired">
+                <element name="forward" ftype="fastqsanger.gz" decompress="true">
+                    <assert_contents>
+                        <has_n_lines n="388"/>
+                    </assert_contents>
+                </element>
+                <element name="reverse" ftype="fastqsanger.gz" decompress="true">
+                    <assert_contents>
+                        <has_n_lines n="388"/>
+                    </assert_contents>
+                </element>
+            </output_collection>
+        </test>
+        
+        <test expect_num_outputs="4">
+            <conditional name="library">
+                <param name="type" value="paired_collection"/>
+                <conditional name="paired_options">
+                    <param name="paired_options_selector" value="no"/>
+                </conditional>
+                <param name="aligned_file" value="true"/>
+                <param name="input_1">
+                    <collection type="paired">
+                        <element name="forward" value="bowtie2-fq1.fq.bz2" ftype="fastqsanger.bz2"/>
+                        <element name="reverse" value="bowtie2-fq2.fq.bz2" ftype="fastqsanger.bz2"/>
+                    </collection>
+                </param>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="history"/>
+                <param name="own_file" value="bowtie2-ref.fasta"/>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+            <output name="output" file="bowtie2-test1.bam" ftype="bam" lines_diff="4" sort="true">
+                <metadata name="sort_order" value="coordinate"/>
+            </output>
+            <output_collection name="output_aligned_read_pairs" type="paired">
+                <element name="forward" ftype="fastqsanger.bz2" decompress="true">
+                    <assert_contents>
+                        <has_n_lines n="12"/>
+                    </assert_contents>
+                </element>
+                <element name="reverse" ftype="fastqsanger.bz2" decompress="true">
+                    <assert_contents>
+                        <has_n_lines n="12"/>
+                    </assert_contents>
+                </element>
+            </output_collection>
+        </test>
+        
+        <test expect_num_outputs="7">
+            <conditional name="library">
+                <param name="type" value="paired_collection"/>
+                <conditional name="paired_options">
+                    <param name="paired_options_selector" value="no"/>
+                </conditional>
+                <param name="unaligned_file" value="true"/>
+                <param name="aligned_file" value="true"/>
+                <param name="input_1">
+                    <collection type="paired">
+                        <element name="forward" value="bowtie2-fq1.fa" ftype="fasta"/>
+                        <element name="reverse" value="bowtie2-fq2.fa" ftype="fasta"/>
+                    </collection>
+                </param>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="history"/>
+                <param name="own_file" value="bowtie2-ref.fasta"/>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+
+            <output_collection name="output_unaligned_read_pairs" type="paired">
+                <element name="forward" ftype="fasta" decompress="true">
+                    <assert_contents>
+                        <has_n_lines n="194"/>
+                    </assert_contents>
+                </element>
+                <element name="reverse" ftype="fasta" decompress="true">
+                    <assert_contents>
+                        <has_n_lines n="194"/>
+                    </assert_contents>
+                </element>
+            </output_collection>
+            <output_collection name="output_aligned_read_pairs" type="paired">
+                <element name="forward" ftype="fasta" decompress="true">
+                    <assert_contents>
+                        <has_n_lines n="6"/>
+                    </assert_contents>
+                </element>
+                <element name="reverse" ftype="fasta" decompress="true">
+                    <assert_contents>
+                        <has_n_lines n="6"/>
+                    </assert_contents>
+                </element>
+            </output_collection>
+
+            <output name="output" file="bowtie2-test_fasta_in.bam" ftype="bam" lines_diff="4" sort="true">
+                <metadata name="sort_order" value="coordinate"/>
+            </output>
+        </test>
+        
+        <test expect_num_outputs="1">
+            <conditional name="library">
+                <param name="type" value="paired_collection"/>
+                <conditional name="paired_options">
+                    <param name="paired_options_selector" value="no"/>
+                </conditional>
+                <param name="unaligned_file" value="false"/>
+                <param name="input_1">
+                    <collection type="paired">
+                        <element name="forward" value="bowtie2-fq1.fa" ftype="fasta"/>
+                        <element name="reverse" value="bowtie2-fq2.fa" ftype="fasta"/>
+                    </collection>
+                </param>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="history"/>
+                <param name="own_file" value="bowtie2-ref.fasta"/>
+            </conditional>
+            <conditional name="sam_options">
+                <param name="sam_options_selector" value="yes"/>
+                <param name="reorder" value="true"/>
+            </conditional>
+            <output name="output" file="bowtie2-test_fasta_in_bam_qname_input_sorted.bam" ftype="qname_input_sorted.bam" lines_diff="4">
+                <metadata name="sort_order" value="unsorted"/>
+            </output>
+        </test>
+        
+        <test expect_num_outputs="1">
+            <conditional name="library">
+                <param name="type" value="paired_collection"/>
+                <conditional name="paired_options">
+                    <param name="paired_options_selector" value="no"/>
+                </conditional>
+                <param name="unaligned_file" value="false"/>
+                <param name="input_1">
+                    <collection type="paired">
+                        <element name="forward" value="bowtie2-fq1.fa" ftype="fasta"/>
+                        <element name="reverse" value="bowtie2-fq2.fa" ftype="fasta"/>
+                    </collection>
+                </param>
+            </conditional>
+            <conditional name="analysis_type">
+                <param name="analysis_type_selector" value="simple"/>
+            </conditional>
+            <conditional name="reference_genome">
+                <param name="source" value="history"/>
+                <param name="own_file" value="bowtie2-ref.fasta"/>
+            </conditional>
+            <conditional name="sam_options">
+                <param name="sam_options_selector" value="yes"/>
+                <param name="sam_opt" value="true"/>
+            </conditional>
+            <output name="output" ftype="sam">
+                <metadata name="sort_order" value="unsorted"/>
+                <assert_contents>
+                    <has_text text="M01368:8:000000000-A3GHV:1:1101:6911:8255"/>
+                </assert_contents>
+            </output>
+        </test>
+    </tests>
+    <help>
+**Bowtie2 Overview**
+
+Bowtie2_ is an ultrafast and memory-efficient tool for aligning sequencing reads to long reference sequences. It is particularly good at aligning reads of about 50 up to 100s or 1,000s of characters to relatively long (e.g. mammalian) genomes. Bowtie 2 supports gapped, local, and paired-end alignment modes. Galaxy wrapper for Bowtie 2 outputs alignments in `BAM format`_, enabling interoperation with a large number of other tools available at this site.
+Majority of information in this page is derived from an excellent `Bowtie2 manual`_ written by Ben Langmead.
+
+.. _Bowtie2: http://bowtie-bio.sourceforge.net/bowtie2/
+.. _`Bowtie2 manual`: http://bowtie-bio.sourceforge.net/bowtie2/manual.shtml
+.. _`BAM format`: http://samtools.github.io/hts-specs/SAMv1.pdf
+
+-----
+
+**Selecting reference genomes for Bowtie2**
+
+Galaxy wrapper for Bowtie2 allows you select between precomputed and user-defined indices for reference genomes using **Will you select a reference genome from your history or use a built-in index?** flag. This flag has two options:
+
+    1. **Use a built-in genome index** - when selected (this is default), Galaxy provides the user with **Select reference genome index** dropdown. Genomes listed in this dropdown have been pre-indexed with bowtie2-build utility and are ready to be mapped against.
+    2. **Use a genome from the history and build index** - when selected, Galaxy provides the user with **Select reference genome sequence** dropdown. This dropdown is populated by all FASTA formatted files listed in your current history. If your genome of interest is uploaded into history it will be shown there. Selecting a genome from this dropdown will cause Galaxy to first transparently index it using bowtie2-build command, and then run mapping with bowtie2.
+
+If your genome of interest is not listed here you have two choices:
+
+    1. Contact galaxy team using **Help-&gt;Support** link at the top of the interface and let us know that an index needs to be added
+    2. Upload your genome of interest as a FASTA file to Galaxy history and selected **Use a genome from the history and build index** option.
+
+------
+
+.. class:: infomark
+
+**Bowtie2 options**
+
+Galaxy wrapper for Bowtie2 implements most but not all options available through the command line. Supported options are described below.
+
+-----
+
+**Inputs**
+
+Bowtie 2 accepts files in Sanger FASTQ format (single or paired-end). Paired-end data can represented as two individual (forward and reverse) datasets, as well as a single interleaved dataset (see an example at the end of the help section).
+
+------
+
+**Input options**::
+
+    --interleaved
+            Reads interleaved FASTQ files where the first two records (8 lines) represent a mate pair.
+
+    -s/--skip &lt;int&gt;
+            Skip (i.e. do not align) the first `&lt;int&gt;` reads or pairs in the input.
+
+    -u/--qupto &lt;int&gt;
+            Align the first `&lt;int&gt;` reads or read pairs from the input (after the
+            `-s`/`--skip` reads or pairs have been skipped), then stop.  Default: no limit.
+
+    -5/--trim5 &lt;int&gt;
+            Trim `&lt;int&gt;` bases from 5' (left) end of each read before alignment (default: 0).
+
+    -3/--trim3 &lt;int&gt;
+            Trim `&lt;int&gt;` bases from 3' (right) end of each read before alignment (default: 0).
+
+    --phred33
+            Input qualities are ASCII chars equal to the Phred quality plus 33.  This is
+            also called the "Phred+33" encoding, which is used by the very latest Illumina
+            pipelines.
+
+    --phred64
+            Input qualities are ASCII chars equal to the Phred quality plus 64.  This is
+            also called the "Phred+64" encoding.
+
+    --solexa-quals
+            Convert input qualities from Solexa Phred quality (which can be negative) to
+            Phred Phred quality (which can't).  This scheme was used in older Illumina GA
+            Pipeline versions (prior to 1.3).  Default: off.
+
+    --int-quals
+            Quality values are represented in the read input file as space-separated ASCII integers, e.g., `40 40 30 40`..., rather than ASCII characters, e.g., `II?I`....
+            Integers are treated as being on the Phred quality scale unless
+            `--solexa-quals` is also specified. Default: off.
+
+------
+
+**Presets in `--end-to-end` mode**::
+
+    --very-fast
+            Same as: `-D 5 -R 1 -N 0 -L 22 -i S,0,2.50`
+
+    --fast
+            Same as: `-D 10 -R 2 -N 0 -L 22 -i S,0,2.50`
+
+    --sensitive
+            Same as: `-D 15 -R 2 -L 22 -i S,1,1.15` (default in `--end-to-end` mode)
+
+    --very-sensitive
+            Same as: `-D 20 -R 3 -N 0 -L 20 -i S,1,0.50`
+
+------
+
+**Presets options in `--local` mode**::
+
+    --very-fast-local
+            Same as: `-D 5 -R 1 -N 0 -L 25 -i S,1,2.00`
+
+    --fast-local
+            Same as: `-D 10 -R 2 -N 0 -L 22 -i S,1,1.75`
+
+    --sensitive-local
+            Same as: `-D 15 -R 2 -N 0 -L 20 -i S,1,0.75` (default in `--local` mode)
+
+    --very-sensitive-local
+            Same as: `-D 20 -R 3 -N 0 -L 20 -i S,1,0.50`
+
+------
+
+**Alignment options**::
+
+    -N &lt;int&gt;
+            Sets the number of mismatches to allowed in a seed alignment during multiseed
+            alignment.  Can be set to 0 or 1. Setting this higher makes alignment slower
+            (often much slower) but increases sensitivity.  Default: 0.
+
+    -L &lt;int&gt;
+            Sets the length of the seed substrings to align during multiseed alignment.
+            Smaller values make alignment slower but more sensitive. Default: the
+            `--sensitive` preset is used by default, which sets `-L` to 22 in
+            `--end-to-end` mode and to 20 in `--local` mode.
+
+    -i &lt;func&gt;
+            Sets a function governing the interval between seed substrings to use during
+            multiseed alignment.  For instance, if the read has 30 characers, and seed
+            length is 10, and the seed interval is 6, the seeds extracted will be:
+
+    Read:      TAGCTACGCTCTACGCTATCATGCATAAAC
+    Seed 1 fw: TAGCTACGCT
+    Seed 1 rc: AGCGTAGCTA
+    Seed 2 fw:       CGCTCTACGC
+    Seed 2 rc:       GCGTAGAGCG
+    Seed 3 fw:             ACGCTATCAT
+    Seed 3 rc:             ATGATAGCGT
+    Seed 4 fw:                   TCATGCATAA
+    Seed 4 rc:                   TTATGCATGA
+
+    Since it's best to use longer intervals for longer reads, this parameter sets
+    the interval as a function of the read length, rather than a single
+    one-size-fits-all number.  For instance, specifying `-i S,1,2.5` sets the
+    interval function `f` to `f(x) = 1 + 2.5 * sqrt(x)`, where x is the read length.
+    If the function returns a result less than
+    1, it is rounded up to 1. Default: the `--sensitive` preset is used by
+    default, which sets `-i` to `S,1,1.15` in `--end-to-end` mode to `-i S,1,0.75`
+    in `--local` mode.
+
+    --n-ceil &lt;func&gt;
+            Sets a function governing the maximum number of ambiguous characters (usually
+            `N`s and/or `.`s) allowed in a read as a function of read length.  For instance,
+            specifying `-L,0,0.15` sets the N-ceiling function `f` to `f(x) = 0 + 0.15 * x`,
+            where x is the read length.  Reads exceeding this ceiling are filtered out.
+            Default: `L,0,0.15`.
+
+    --dpad &lt;int&gt;
+            "Pads" dynamic programming problems by `&lt;int&gt;` columns on either side to allow
+            gaps.  Default: 15.
+
+    --gbar &lt;int&gt;
+            Disallow gaps within `&lt;int&gt;` positions of the beginning or end of the read.
+            Default: 4.
+
+    --ignore-quals
+            When calculating a mismatch penalty, always consider the quality value at the
+            mismatched position to be the highest possible, regardless of the actual value.
+            I.e. input is treated as though all quality values are high.  This is also the
+            default behavior when the input doesn't specify quality values (e.g. in `-f`,
+            `-r`, or `-c` modes).
+
+    --nofw/--norc
+            If `--nofw` is specified, `bowtie2` will not attempt to align unpaired reads to
+            the forward (Watson) reference strand.  If `--norc` is specified, `bowtie2` will
+            not attempt to align unpaired reads against the reverse-complement (Crick)
+            reference strand. In paired-end mode, `--nofw` and `--norc` pertain to the
+            fragments; i.e. specifying `--nofw` causes `bowtie2` to explore only those
+            paired-end configurations corresponding to fragments from the reverse-complement
+            (Crick) strand.  Default: both strands enabled.
+
+    --no-1mm-upfront
+            By default, Bowtie 2 will attempt to find either an exact or a 1-mismatch
+            end-to-end alignment for the read *before* trying the multiseed heuristic.  Such
+            alignments can be found very quickly, and many short read alignments have exact or
+            near-exact end-to-end alignments.  However, this can lead to unexpected
+            alignments when the user also sets options governing the multiseed heuristic,
+            like `-L` and `-N`.  For instance, if the user specifies `-N 0` and `-L` equal
+            to the length of the read, the user will be surprised to find 1-mismatch alignments
+            reported.  This option prevents Bowtie 2 from searching for 1-mismatch end-to-end
+            alignments before using the multiseed heuristic, which leads to the expected
+            behavior when combined with options such as `-L` and `-N`.  This comes at the
+            expense of speed.
+
+    --end-to-end
+            In this mode, Bowtie 2 requires that the entire read align from one end to the
+            other, without any trimming (or "soft clipping") of characters from either end.
+            The match bonus `--ma` always equals 0 in this mode, so all alignment scores
+            are less than or equal to 0, and the greatest possible alignment score is 0.
+            This is mutually exclusive with `--local`.  `--end-to-end` is the default mode.
+
+    --local
+            In this mode, Bowtie 2 does not require that the entire read align from one end
+            to the other.  Rather, some characters may be omitted ("soft clipped") from the
+            ends in order to achieve the greatest possible alignment score.  The match bonus
+            `--ma` is used in this mode, and the best possible alignment score is equal to
+            the match bonus (`--ma`) times the length of the read.  Specifying `--local`
+            and one of the presets (e.g. `--local --very-fast`) is equivalent to specifying
+            the local version of the preset (`--very-fast-local`).  This is mutually
+            exclusive with `--end-to-end`.  `--end-to-end` is the default mode.
+
+-----
+
+**Scoring options**::
+
+    --ma &lt;int&gt;
+            Sets the match bonus.  In `--local` mode `&lt;int&gt;` is added to the alignment
+            score for each position where a read character aligns to a reference character
+            and the characters match.  Not used in `--end-to-end` mode.  Default: 2.
+
+    --mp MX,MN
+            Sets the maximum (`MX`) and minimum (`MN`) mismatch penalties, both integers.  A
+            number less than or equal to `MX` and greater than or equal to `MN` is
+            subtracted from the alignment score for each position where a read character
+            aligns to a reference character, the characters do not match, and neither is an
+            `N`.  If `--ignore-quals` is specified, the number subtracted quals `MX`.
+            Otherwise, the number subtracted is `MN + floor( (MX-MN)(MIN(Q, 40.0)/40.0) )`
+            where Q is the Phred quality value.  Default: `MX` = 6, `MN` = 2.
+
+    --np &lt;int&gt;
+            Sets penalty for positions where the read, reference, or both, contain an
+            ambiguous character such as `N`.  Default: 1.
+
+    --rdg &lt;int1&gt;,&lt;int2&gt;
+            Sets the read gap open (`&lt;int1&gt;`) and extend (`&lt;int2&gt;`) penalties.  A read gap of
+            length N gets a penalty of `&lt;int1&gt;` + N * `&lt;int2&gt;`.  Default: 5, 3.
+
+    --rfg &lt;int1&gt;,&lt;int2&gt;
+            Sets the reference gap open (`&lt;int1&gt;`) and extend (`&lt;int2&gt;`) penalties.  A
+            reference gap of length N gets a penalty of `&lt;int1&gt;` + N * `&lt;int2&gt;`.  Default:
+            5, 3.
+
+    --score-min &lt;func&gt;
+            Sets a function governing the minimum alignment score needed for an alignment to
+            be considered "valid" (i.e. good enough to report).  This is a function of read
+            length. For instance, specifying `L,0,-0.6` sets the minimum-score function `f`
+            to `f(x) = 0 + -0.6 * x`, where `x` is the read length.  The default in `--end-to-end` mode is `L,-0.6,-0.6` and
+            the default in `--local` mode is `G,20,8`.
+
+-----
+
+**Reporting options**::
+
+    -k &lt;int&gt;
+            By default, `bowtie2` searches for distinct, valid alignments for each read.
+            When it finds a valid alignment, it continues looking for alignments that are
+            nearly as good or better.  The best alignment found is reported (randomly
+            selected from among best if tied).  Information about the best alignments is
+            used to estimate mapping quality and to set SAM optional fields, such as
+            `AS:i` and `XS:i`.
+
+    When `-k` is specified, however, `bowtie2` behaves differently.  Instead, it
+    searches for at most `&lt;int&gt;` distinct, valid alignments for each read.  The
+    search terminates when it can't find more distinct valid alignments, or when it
+    finds `&lt;int&gt;`, whichever happens first.  All alignments found are reported in
+    descending order by alignment score. The alignment score for a paired-end
+    alignment equals the sum of the alignment scores of the individual mates. Each
+    reported read or pair alignment beyond the first has the SAM 'secondary' bit
+    (which equals 256) set in its FLAGS field.  For reads that have more than
+    `&lt;int&gt;` distinct, valid alignments, `bowtie2` does not guarantee that the
+    `&lt;int&gt;` alignments reported are the best possible in terms of alignment score.
+    `-k` is mutually exclusive with `-a`.
+
+    Note: Bowtie 2 is not designed with large values for `-k` in mind, and when
+    aligning reads to long, repetitive genomes large `-k` can be very, very slow.
+
+    -a
+            Like `-k` but with no upper limit on number of alignments to search for.  `-a`
+            is mutually exclusive with `-k`.
+
+    Note: Bowtie 2 is not designed with `-a` mode in mind, and when
+    aligning reads to long, repetitive genomes this mode can be very, very slow.
+
+-----
+
+**Effort options**::
+
+    -D &lt;int&gt;
+            Up to `&lt;int&gt;` consecutive seed extension attempts can "fail" before Bowtie 2
+            moves on, using the alignments found so far.  A seed extension "fails" if it
+            does not yield a new best or a new second-best alignment.  This limit is
+            automatically adjusted up when -k or -a are specified.  Default: 15.
+
+    -R &lt;int&gt;
+            `&lt;int&gt;` is the maximum number of times Bowtie 2 will "re-seed" reads with
+            repetitive seeds. When "re-seeding," Bowtie 2 simply chooses a new set of reads
+            (same length, same number of mismatches allowed) at different offsets and
+            searches for more alignments.  A read is considered to have repetitive seeds if
+            the total number of seed hits divided by the number of seeds that aligned at
+            least once is greater than 300.  Default: 2.3
+    
+    -d/--deterministic-seeds
+            Consider all seeds in order (no subsampling). Can be used to augment -a or -k with 
+            deterministic behavior. This option significantly speeds up -a while also reducing memory consumption. 
+            It is not however always strictly better than standalone [-a] when considering the 
+            number of repeated alignments found.    
+            
+-----
+
+**Paired-end options**::
+
+    -I/--minins &lt;int&gt;
+            The minimum fragment length for valid paired-end alignments.  E.g. if `-I 60` is
+            specified and a paired-end alignment consists of two 20-bp alignments in the
+            appropriate orientation with a 20-bp gap between them, that alignment is
+            considered valid (as long as `-X` is also satisfied).  A 19-bp gap would not
+            be valid in that case.  If trimming options `-3` or `-5` are also used, the
+            `-I` constraint is applied with respect to the untrimmed mates.
+
+            The larger the difference between `-I` and `-X`, the slower Bowtie 2 will
+            run.  This is because larger differences bewteen `-I` and `-X` require that
+            Bowtie 2 scan a larger window to determine if a concordant alignment exists.
+            For typical fragment length ranges (200 to 400 nucleotides), Bowtie 2 is very
+            efficient.
+
+            Default: 0 (essentially imposing no minimum)
+
+    -X/--maxins &lt;int&gt;
+            The maximum fragment length for valid paired-end alignments.  E.g. if `-X 100`
+            is specified and a paired-end alignment consists of two 20-bp alignments in the
+            proper orientation with a 60-bp gap between them, that alignment is considered
+            valid (as long as `-I` is also satisfied).  A 61-bp gap would not be valid in
+            that case.  If trimming options `-3` or `-5` are also used, the `-X`
+            constraint is applied with respect to the untrimmed mates, not the trimmed
+            mates.
+
+            The larger the difference between `-I` and `-X`, the slower Bowtie 2 will
+            run.  This is because larger differences bewteen `-I` and `-X` require that
+            Bowtie 2 scan a larger window to determine if a concordant alignment exists.
+            For typical fragment length ranges (200 to 400 nucleotides), Bowtie 2 is very
+            efficient.
+
+            Default: 500.
+
+    --fr/--rf/--ff
+            The upstream/downstream mate orientations for a valid paired-end alignment
+            against the forward reference strand.  E.g., if `--fr` is specified and there is
+            a candidate paired-end alignment where mate 1 appears upstream of the reverse
+            complement of mate 2 and the fragment length constraints (`-I` and `-X`) are
+            met, that alignment is valid.  Also, if mate 2 appears upstream of the reverse
+            complement of mate 1 and all other constraints are met, that too is valid.
+            `--rf` likewise requires that an upstream mate1 be reverse-complemented and a
+            downstream mate2 be forward-oriented. ` --ff` requires both an upstream mate 1
+            and a downstream mate 2 to be forward-oriented.  Default: `--fr` (appropriate
+            for Illumina's Paired-end Sequencing Assay).
+
+    --no-mixed
+            By default, when `bowtie2` cannot find a concordant or discordant alignment for
+            a pair, it then tries to find alignments for the individual mates.  This option
+            disables that behavior.
+
+    --no-discordant
+            By default, `bowtie2` looks for discordant alignments if it cannot find any
+            concordant alignments.  A discordant alignment is an alignment where both mates
+            align uniquely, but that does not satisfy the paired-end constraints
+            (`--fr`/`--rf`/`--ff`, `-I`, `-X`).  This option disables that behavior.
+
+    --dovetail
+            If the mates "dovetail", that is if one mate alignment extends past the
+            beginning of the other such that the wrong mate begins upstream, consider that
+            to be concordant.  Default: mates cannot dovetail in a concordant alignment.
+
+    --no-contain
+            If one mate alignment contains the other, consider that to be non-concordant.
+            Default: a mate can contain the other in a concordant alignment.
+
+    --no-overlap
+            If one mate alignment overlaps the other at all, consider that to be
+            non-concordant.  Default: mates can overlap in a concordant alignment.
+
+------
+
+**SAM options**::
+
+    --rg-id &lt;text&gt;
+            Set the read group ID to `&lt;text&gt;`.  This causes the SAM `@RG` header line to be
+            printed, with `&lt;text&gt;` as the value associated with the `ID:` tag.  It also
+            causes the `RG:Z:` extra field to be attached to each SAM output record, with
+            value set to `&lt;text&gt;`.
+
+    --rg &lt;text&gt;
+            Add `&lt;text&gt;` (usually of the form `TAG:VAL`, e.g. `SM:Pool1`) as a field on the
+            `@RG` header line.  Note: in order for the `@RG` line to appear, `--rg-id`
+            must also be specified.  This is because the `ID` tag is required by the SAM
+            Specification.  Specify `--rg` multiple times to set multiple fields.  See the
+            SAM Specification for details about what fields are legal.
+
+    --omit-sec-seq
+            When printing secondary alignments, Bowtie 2 by default will write out the `SEQ`
+            and `QUAL` strings.  Specifying this option causes Bowtie 2 to print an asterix
+            in those fields instead.
+
+-----
+
+**Other options**::
+
+    --reorder
+            Guarantees that output SAM records are printed in an order corresponding to the
+            order of the reads in the original input file, even when `-p` is set greater
+            than 1.  Specifying `--reorder` and setting `-p` greater than 1 causes Bowtie
+            2 to run somewhat slower and use somewhat more memory then if `--reorder` were
+            not specified.  Has no effect if `-p` is set to 1, since output order will
+            naturally correspond to input order in that case.
+
+    --seed &lt;int&gt;
+            Use `&lt;int&gt;` as the seed for pseudo-random number generator.  Default: 0.
+
+    --non-deterministic
+            Normally, Bowtie 2 re-initializes its pseudo-random generator for each read.  It
+            seeds the generator with a number derived from (a) the read name, (b) the
+            nucleotide sequence, (c) the quality sequence, (d) the value of the `--seed`
+            option. This means that if two reads are identical (same name, same
+            nucleotides, same qualities) Bowtie 2 will find and report the same alignment(s)
+            for both, even if there was ambiguity.  When `--non-deterministic` is specified,
+            Bowtie 2 re-initializes its pseudo-random generator for each read using the
+            current time.  This means that Bowtie 2 will not necessarily report the same
+            alignment for two identical reads.  This is counter-intuitive for some users,
+            but might be more appropriate in situations where the input consists of many
+            identical reads.
+
+-----
+
+
+**Paired-end (and mate-pair) data in fastq format**
+
+Paired end datasets can be represented as two individual datasets:
+
+First dataset::
+
+ @1/1
+ AGGGATGTGTTAGGGTTAGGGTTAGGGTTAGGGTTAGGGTTAGGGTTA
+ +
+ EGGEGGGDFGEEEAEECGDEGGFEEGEFGBEEDDECFEFDD@CDD&lt;ED
+ @2/1
+ AGGGATGTGTTAGGGTTAGGGTTAGGGTTAGGGTTAGGGTTAGGGTTA
+ +
+ HHHHHHEGFHEEFEEHEEHHGGEGGGGEFGFGGGGHHHHFBEEEEEFG
+
+Second dataset::
+
+ @1/2
+ CCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAAC
+ +
+ GHHHDFDFGFGEGFBGEGGEGEGGGHGFGHFHFHHHHHHHEF?EFEFF
+ @2/2
+ CCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAAC
+ +
+ HHHHHHHHHHHHHGHHHHHHGHHHHHHHHHHHFHHHFHHHHHHHHHHH
+
+Or a single *interleaved* dataset::
+
+ @1/1
+ AGGGATGTGTTAGGGTTAGGGTTAGGGTTAGGGTTAGGGTTAGGGTTA
+ +
+ EGGEGGGDFGEEEAEECGDEGGFEEGEFGBEEDDECFEFDD@CDD&lt;ED
+ @1/2
+ CCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAAC
+ +
+ GHHHDFDFGFGEGFBGEGGEGEGGGHGFGHFHFHHHHHHHEF?EFEFF
+ @2/1
+ AGGGATGTGTTAGGGTTAGGGTTAGGGTTAGGGTTAGGGTTAGGGTTA
+ +
+ HHHHHHEGFHEEFEEHEEHHGGEGGGGEFGFGGGGHHHHFBEEEEEFG
+ @2/2
+ CCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAACCCTAAC
+ +
+ HHHHHHHHHHHHHGHHHHHHGHHHHHHHHHHHFHHHFHHHHHHHHHHH
+    </help>
+    <citations>
+        <citation type="doi">10.1186/gb-2009-10-3-r25</citation>
+        <citation type="doi">10.1038/nmeth.1923</citation>
+    </citations>
+</tool>

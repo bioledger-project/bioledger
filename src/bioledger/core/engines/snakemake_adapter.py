@@ -11,10 +11,11 @@ extra installed. The import error surfaces at call time with install instruction
 
 from __future__ import annotations
 
+import json
 import logging
+import shlex
 import shutil
-import subprocess
-import time
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,6 @@ from bioledger.core.engines.protocol import (
     RunHandle,
     RunStatus,
     WorkflowHandle,
-    _is_process_alive,
     build_output_patterns,
     parse_collection_value,
     split_collection_inputs,
@@ -59,6 +59,25 @@ def _parse_collection_value(value: str) -> tuple[str, str]:
     .. deprecated:: Use ``parse_collection_value`` from ``protocol`` directly.
     """
     return parse_collection_value(value)
+
+
+def _stats_progress(run_handle: RunHandle) -> tuple[int, int]:
+    """Read (completed, total) job counts from a live run's stats.json."""
+    stats_path = Path(run_handle.work_dir) / "stats.json"
+    completed = 0
+    total = 0
+    if stats_path.exists():
+        try:
+            stats = json.loads(stats_path.read_text())
+            total_stats = stats.get("total", {})
+            total = total_stats.get("jobs", 0)
+            completed = sum(
+                v for k, v in total_stats.get("exit-code", {}).items()
+                if k == "0"
+            )
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return completed, total
 
 
 def _generate_snakefile(
@@ -251,6 +270,7 @@ class SnakemakeAdapter:
             executor_name="snakemake",
             engine_version=self._detect_version(),
             log_filename="snakemake.log",
+            spec=spec,
         )
 
     def generate(
@@ -267,9 +287,12 @@ class SnakemakeAdapter:
         """
         container_image = resolve_container_from_spec(spec)
 
-        # Use a temporary artifact path — submit() will write it to work_dir
-        import tempfile
-        artifact_path = Path(tempfile.gettempdir()) / f"bioledger_snakefile_{int(time.time())}.smk"
+        # Use a unique temporary artifact path — submit() writes it to work_dir.
+        # NamedTemporaryFile avoids the one-second-collision of time.time() names.
+        with tempfile.NamedTemporaryFile(
+            mode="w", prefix="bioledger_snakefile_", suffix=".smk", delete=False
+        ) as tf:
+            artifact_path = Path(tf.name)
 
         step_inventory, collection_inputs = _generate_snakefile(
             spec, input_mapping, container_image, artifact_path
@@ -333,74 +356,32 @@ class SnakemakeAdapter:
         cmd.extend(extra_args)
         cmd.extend(self._config.extra_args)
 
-        # Launch as subprocess (non-blocking)
-        log_path = work_dir / "snakemake.log"
-        log_file = open(log_path, "w")
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(work_dir),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        finally:
-            log_file.close()
+        # Launch as subprocess (non-blocking) via the shared shell wrapper —
+        # gets the .exit_code EXIT-trap sidecar for free.
+        from bioledger.core.engines._subprocess import launch_logged_process
 
-        run_id = str(proc.pid)
-
-        # Record process start time for PID recycling guard
-        process_start_time = None
-        try:
-            import psutil
-
-            process_start_time = psutil.Process(proc.pid).create_time()
-        except Exception:
-            pass
-
-        return RunHandle(
-            executor="snakemake",
-            run_id=run_id,
-            entry_id="",  # set by the caller (dispatch layer)
+        return launch_logged_process(
+            shlex.join(cmd),
             work_dir=work_dir,
-            status="running",
-            process_start_time=process_start_time,
+            executor_name="snakemake",
+            log_filename="snakemake.log",
             metadata={"engine_version": self._detect_version()},
         )
 
     def poll(self, run_handle: RunHandle) -> RunStatus | None:
-        """Check if the snakemake subprocess is still running."""
-        try:
-            pid = int(run_handle.run_id)
-        except ValueError:
-            return None
+        """Check if the snakemake subprocess is still running.
 
-        if not _is_process_alive(pid, run_handle.process_start_time):
-            # Process finished — check exit status from log
-            return self._check_completion(run_handle)
+        ``.exit_code`` (written by the launch wrapper's EXIT trap) is the
+        source of truth; ``_check_completion`` (stats.json + log grepping)
+        is the fallback for runs without a sidecar.
+        """
+        from bioledger.core.engines._subprocess import poll_local_process
 
-        # Still running — try to get progress from stats
-        stats_path = Path(run_handle.work_dir) / "stats.json"
-        completed = 0
-        total = 0
-        if stats_path.exists():
-            try:
-                import json
-                stats = json.loads(stats_path.read_text())
-                total_stats = stats.get("total", {})
-                total = total_stats.get("jobs", 0)
-                completed = sum(
-                    v for k, v in total_stats.get("exit-code", {}).items()
-                    if k == "0"
-                )
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-        return RunStatus(
-            state="running",
-            completed=completed,
-            total=total,
-            message="",
+        return poll_local_process(
+            run_handle,
+            log_filename="snakemake.log",
+            fallback_check=self._check_completion,
+            progress_fn=_stats_progress,
         )
 
     def _check_completion(self, run_handle: RunHandle) -> RunStatus | None:

@@ -95,7 +95,10 @@ class TestWrapForExitCode:
         wrapped = _wrap_for_exit_code(cmd)
         assert wrapped[0] == "sh"
         assert wrapped[1] == "-c"
-        assert "echo $? > .exit_code" in wrapped[2]
+        # EXIT trap + env-var destination — survives `exit N` inside the
+        # command and paths with spaces/quotes.
+        assert 'echo $? > "$BIOLEDGER_EXIT_CODE_PATH"' in wrapped[2]
+        assert wrapped[2].startswith("trap '")
         # Round-trip: the original command should be in the wrapped string
         assert "samtools sort -o out.bam" in wrapped[2]
 
@@ -105,7 +108,9 @@ class TestWrapForExitCode:
         assert wrapped[0] == "sh"
         assert wrapped[1] == "-c"
         # Should unwrap and re-wrap the raw string, not double-nest
-        assert wrapped[2] == "a | b; echo $? > .exit_code"
+        assert wrapped[2] == (
+            "trap 'echo $? > \"$BIOLEDGER_EXIT_CODE_PATH\"' EXIT\na | b"
+        )
 
 
 class TestSubmit:

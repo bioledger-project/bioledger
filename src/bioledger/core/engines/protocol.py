@@ -75,29 +75,44 @@ class RunHandle(BaseModel):
 
 
 def _is_process_alive(pid: int, expected_start_time: float | None = None) -> bool:
-    """Check if a process is alive, with optional PID-recycling guard.
+    """Check if a process is alive, with PID-recycling and zombie detection.
 
-    Uses ``os.kill(pid, 0)`` for the basic check, then verifies the process
-    start time via psutil if an ``expected_start_time`` is provided.
+    ``os.kill(pid, 0)`` alone treats zombies as alive (they still occupy a
+    PID slot until reaped), so a polling-only caller would see "running"
+    forever. Own children are reaped via ``os.waitpid(WNOHANG)``; foreign
+    zombies are detected through psutil's status. ``expected_start_time``
+    guards against PID reuse via ``psutil.Process.create_time()``.
     Falls back to ``os.kill`` only if psutil is unavailable.
     """
+    # Reap if it's our zombie child; ChildProcessError/OSError when the
+    # PID is not our child — fall through to the generic checks.
+    try:
+        reaped_pid, _ = os.waitpid(pid, os.WNOHANG)
+        if reaped_pid == pid:
+            return False
+    except (ChildProcessError, OSError):
+        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    if expected_start_time is not None:
-        try:
-            import psutil
-        except ImportError:
-            pass
-        else:
-            try:
-                if psutil.Process(pid).create_time() != expected_start_time:
-                    return False
-            except psutil.NoSuchProcess:
-                pass
+    try:
+        import psutil
+    except ImportError:
+        return True
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        if (
+            expected_start_time is not None
+            and proc.create_time() != expected_start_time
+        ):
+            return False
+    except psutil.NoSuchProcess:
+        pass  # os.kill said alive — tolerate the check race
     return True
 
 

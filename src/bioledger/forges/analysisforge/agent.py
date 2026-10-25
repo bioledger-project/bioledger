@@ -101,8 +101,6 @@ def _finalize_engine_entry(
     Calls adapter.collect() for engine-specific cleanup, discovers outputs
     from the work directory, creates FileRef objects, and persists status.
     """
-    import hashlib as _hashlib
-
     from bioledger.forges.analysisforge.executor import _discover_outputs
     from bioledger.toolspec.models import ExecutionSpec, ToolSpec
 
@@ -122,8 +120,16 @@ def _finalize_engine_entry(
             "Cannot reconstruct ToolSpec for entry %s, skipping output discovery",
             entry.id,
         )
-        entry.run_status = status.state
-        entry.exit_code = 0 if status.state == "completed" else 1
+        # Same status mapping as the main path — never persist "unknown".
+        if status.state == "completed":
+            entry.run_status = "completed"
+            entry.exit_code = 0
+        elif status.state == "failed":
+            entry.run_status = "failed"
+            entry.exit_code = 1
+        else:  # "unknown"
+            entry.run_status = "failed"
+            entry.exit_code = None
         if status.message:
             entry.notes = (
                 (entry.notes + "\n" if entry.notes else "")
@@ -136,12 +142,27 @@ def _finalize_engine_entry(
         str((work_dir / name).resolve()) for name in input_mapping.values()
     }
 
-    # Exclude known metadata files from output discovery
+    # Exclude engine bookkeeping/sidecar files and engine work subtrees
+    # from output discovery — they are run infrastructure, not outputs.
     exclude_paths: set[str] = set()
     for meta_file in (
         "_engine_metadata.json",
         "_pre_snapshot.json",
         "_process_start_time.json",
+        ".exit_code",
+        "nextflow.log",
+        "snakemake.log",
+        "galaxy.log",
+        ".nextflow.log",
+        "wrapper.log",
+        "params.json",
+        "config.yaml",
+        "Snakefile",
+        "main.nf",
+        "wrapper_main.nf",
+        "nextflow.config",
+        "stats.json",
+        "job.yml",
     ):
         meta_path = work_dir / meta_file
         if meta_path.exists():
@@ -151,8 +172,14 @@ def _finalize_engine_entry(
     if sidecar_exclude.exists():
         exclude_paths.add(str(sidecar_exclude.resolve()))
 
+    exclude_dirs = {
+        (work_dir / d).resolve()
+        for d in ("work", ".nextflow", ".snakemake", entry.id)
+        if (work_dir / d).exists()
+    }
     output_paths = _discover_outputs(
-        spec, work_dir, {}, staged_input_paths, exclude_paths=exclude_paths,
+        spec, work_dir, {}, staged_input_paths,
+        exclude_paths=exclude_paths, exclude_dirs=exclude_dirs,
     )
 
     # Also include paths from collect() that aren't already discovered
@@ -163,9 +190,11 @@ def _finalize_engine_entry(
             output_paths.append(col_path)
 
     # 3. Create FileRef objects for discovered outputs
+    from bioledger.forges.analysisforge.executor import _hash_file
+
     for out_path in output_paths:
         try:
-            sha256 = _hashlib.sha256(out_path.read_bytes()).hexdigest()
+            sha256 = _hash_file(out_path)
             entry.files.append(
                 FileRef(
                     path=str(out_path),
@@ -177,9 +206,21 @@ def _finalize_engine_entry(
         except Exception as e:
             logging.warning("Failed to create FileRef for %s: %s", out_path, e)
 
-    # 4. Persist status
-    entry.run_status = status.state
-    entry.exit_code = 0 if status.state == "completed" else 1
+    # 4. Persist status. run_status only admits running/completed/failed —
+    # an uncertain "unknown" finalizes as failed with exit_code=None (the
+    # real exit code is read from the .exit_code sidecar when present).
+    from bioledger.core.engines._subprocess import read_exit_code
+
+    sidecar_code = read_exit_code(work_dir)
+    if status.state == "completed":
+        entry.run_status = "completed"
+        entry.exit_code = sidecar_code if sidecar_code is not None else 0
+    elif status.state == "failed":
+        entry.run_status = "failed"
+        entry.exit_code = sidecar_code if sidecar_code is not None else 1
+    else:  # "unknown"
+        entry.run_status = "failed"
+        entry.exit_code = sidecar_code
     if status.message:
         entry.notes = (
             (entry.notes + "\n" if entry.notes else "") + status.message
@@ -873,7 +914,23 @@ class AnalysisForgeAgent:
                         process_start_time=meta.get("process_start_time"),
                     )
                     status = adapter.poll(rh)
-                    if status is not None and status.state in (
+                    if status is None:
+                        # poll() couldn't resolve the run — only fatal when
+                        # the run handle itself is unusable (non-PID); a
+                        # transient remote-engine error just retries later.
+                        if not (entry.run_handle_id or "").isdigit():
+                            logging.warning(
+                                "Entry %s has an invalid run handle ID "
+                                "(%r) — marking as failed",
+                                entry.id, entry.run_handle_id,
+                            )
+                            entry.run_status = "failed"
+                            entry.notes = (
+                                (entry.notes + "\n" if entry.notes else "")
+                                + "Invalid or missing run handle ID — "
+                                "cannot poll"
+                            )
+                    elif status.state in (
                         "completed", "failed", "unknown"
                     ):
                         _finalize_engine_entry(

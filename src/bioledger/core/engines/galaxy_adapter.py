@@ -272,6 +272,7 @@ class GalaxyAdapter:
             executor_name="galaxy",
             engine_version=self._detect_version(),
             log_filename="galaxy.log",
+            spec=spec,
         )
 
     def generate(
@@ -487,11 +488,23 @@ class GalaxyAdapter:
         )
 
     def poll(self, run_handle: RunHandle) -> RunStatus | None:
-        """Check if the Galaxy workflow invocation is still running.
+        """Check if a submitted run is still running.
 
-        Both planemo and remote modes use bioblend to poll the invocation state.
+        ``submit_spec()`` runs are local planemo subprocesses — poll via the
+        shared PID/``.exit_code`` path. (The legacy ``submit()`` path also
+        returns local planemo PIDs; Galaxy invocation polling via bioblend
+        only applied to remote-mode runs, which are not yet reachable.)
         """
-        return self._poll_invocation(run_handle)
+        from bioledger.core.engines._subprocess import (
+            log_fallback,
+            poll_local_process,
+        )
+
+        return poll_local_process(
+            run_handle,
+            log_filename="galaxy.log",
+            fallback_check=log_fallback("galaxy.log"),
+        )
 
     def _poll_invocation(self, run_handle: RunHandle) -> RunStatus | None:
         """Poll Galaxy workflow invocation via bioblend (unified for both modes)."""
