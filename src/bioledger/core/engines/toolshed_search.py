@@ -17,6 +17,7 @@ from bioledger.toolspec.models import (
     ParamType,
     ToolInput,
     ToolOutput,
+    ToolParameter,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,68 +96,94 @@ def download_tool(
     revision: str | None = None,
     dest_dir: Path | None = None,
 ) -> tuple[Path, str]:
-    """Download tool XML + macros.xml + scripts to cache dir.
+    """Download expanded tool XML for a repository revision.
 
-    Uses ts.repositories.get_repository_revision_install_info() to get the
-    file list, then downloads each file via the Tool Shed API.
+    Tool Shed 2.0 removed the legacy ``/repository/download`` endpoint
+    (404) and blocks Mercurial archive/raw-file URLs (403). The live API
+    serves each tool's *expanded* document — macros already inlined — via
+    ``/api/tools/{owner}~{repo}~{tool_id}/versions/{version}/tool_source``.
+
+    Note: arbitrary repository files (scripts, test data) are NOT
+    downloadable via the Tool Shed 2.0 API — only the tool XML itself.
 
     Returns tuple of (path to downloaded tool directory, resolved changeset
     revision).
     """
-    try:
-        from bioblend.toolshed import ToolShedInstance
-    except ImportError:
-        raise RuntimeError(
-            "bioblend is not installed. "
-            "Install with: pip install bioledger[galaxy]"
-        )
+    import httpx
 
-    ts = ToolShedInstance(url=TOOLSHED_URL)
     dest = dest_dir or (_CACHE_DIR / repo_owner / repo_name)
     dest.mkdir(parents=True, exist_ok=True)
 
-    # Get repository revisions
+    # 1. Resolve the changeset revision (pinned or latest installable).
     if revision:
-        revisions = [revision]
+        rev = revision
     else:
-        repo_info = ts.repositories.show_repository(
-            f"{repo_owner}/{repo_name}"
+        resp = httpx.get(
+            f"{TOOLSHED_URL}/api/repositories/get_ordered_installable_revisions",
+            params={"owner": repo_owner, "name": repo_name},
+            timeout=30.0,
         )
-        revisions = [
-            r.get("changeset_revision", "")
-            for r in repo_info.get("repo_revisions", [])
-        ]
-        if not revisions:
-            # Fall back to latest
-            revisions = [repo_info.get("tip_revision", "")]
+        resp.raise_for_status()
+        revs = resp.json()
+        if not revs:
+            raise RuntimeError(
+                f"No installable revisions for {repo_owner}/{repo_name}"
+            )
+        rev = revs[-1]
 
-    rev = revisions[0] if revisions else ""
-
-    # Get file list for this revision
-    install_info = ts.repositories.get_repository_revision_install_info(
-        f"{repo_owner}/{repo_name}",
-        rev,
+    # 2. Enumerate valid tools at this revision. install_info is a
+    # 3-tuple: [repo, metadata, tools]; metadata.valid_tools carries the
+    # tool id and a guid whose last segment is the tool version.
+    resp = httpx.get(
+        f"{TOOLSHED_URL}/api/repositories/get_repository_revision_install_info",
+        params={
+            "name": repo_name,
+            "owner": repo_owner,
+            "changeset_revision": rev,
+        },
+        timeout=30.0,
     )
+    resp.raise_for_status()
+    info = resp.json()
+    valid_tools = (
+        info[1].get("valid_tools", [])
+        if isinstance(info, list) and len(info) > 1
+        else []
+    )
+    if not valid_tools:
+        raise RuntimeError(
+            f"Revision {rev} of {repo_owner}/{repo_name} declares no valid tools"
+        )
 
-    # Download files
-    import httpx
-
-    for file_info in install_info:
-        file_path = file_info.get("file_path", "")
-        if not file_path:
+    # 3. Download each tool's expanded document.
+    downloaded = 0
+    for tool in valid_tools:
+        tool_id = tool.get("id")
+        guid = tool.get("guid", "")
+        tool_version = guid.rsplit("/", 1)[-1] if "/" in guid else ""
+        if not tool_id or not tool_version:
             continue
+        ts_id = f"{repo_owner}~{repo_name}~{tool_id}"
         url = (
-            f"{TOOLSHED_URL}/repository/download?"
-            f"repository_id={repo_owner}/{repo_name}"
-            f"&changeset_revision={rev}&file={file_path}"
+            f"{TOOLSHED_URL}/api/tools/{ts_id}"
+            f"/versions/{tool_version}/tool_source"
         )
         try:
-            resp = httpx.get(url, timeout=30.0, follow_redirects=True)
-            if resp.status_code == 200:
-                local_path = dest / Path(file_path).name
-                local_path.write_bytes(resp.content)
+            tool_resp = httpx.get(url, timeout=30.0)
+            if tool_resp.status_code == 200:
+                (dest / f"{tool_id}.xml").write_text(tool_resp.text)
+                downloaded += 1
+            else:
+                logger.warning(
+                    "tool_source %s returned %d", ts_id, tool_resp.status_code,
+                )
         except Exception as e:
-            logger.warning("Failed to download %s: %s", file_path, e)
+            logger.warning("Failed to download %s: %s", ts_id, e)
+
+    if downloaded == 0:
+        raise RuntimeError(
+            f"Failed to download any tool XML for {repo_owner}/{repo_name}@{rev}"
+        )
 
     return dest, rev
 
@@ -198,7 +225,7 @@ def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
     requirements = root.find("requirements")
     if requirements is not None:
         for req in requirements.findall("requirement"):
-            if req.get("type") == "docker":
+            if req.get("type") in ("docker", "container"):
                 container = req.text or ""
                 break
 
@@ -207,23 +234,61 @@ def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
     # the raw Cheetah template is not useful for direct execution.
     command = ""
 
-    # Extract inputs from <inputs><param> elements
+    # Extract inputs + parameters from <inputs>. Galaxy nests most real
+    # params inside <conditional>/<when>/<repeat>/<section> — walk them
+    # recursively, using Galaxy's own `parent|child` naming (seen in
+    # valid_tools test specs like "library|input_1"). Only type="data"
+    # (and data_collection) params are files; everything else is a
+    # ToolParameter — treating them all as FILE poisoned job.yml.
     inputs: dict[str, ToolInput] = {}
+    parameters: dict[str, ToolParameter] = {}
+
+    def _walk_params(elem: ET.Element, prefix: str = ""):
+        for child in elem:
+            if child.tag == "param":
+                name = child.get("name", "")
+                if name:
+                    yield f"{prefix}{name}", child
+            elif child.tag == "conditional":
+                cond_name = child.get("name", "")
+                for sub in child:
+                    if sub.tag == "param" and sub.get("name"):
+                        yield f"{prefix}{cond_name}|{sub.get('name')}", sub
+                    elif sub.tag == "when":
+                        yield from _walk_params(sub, f"{prefix}{cond_name}|")
+            elif child.tag in ("repeat", "section"):
+                yield from _walk_params(
+                    child, f"{prefix}{child.get('name', '')}|",
+                )
+
+    _param_types = {
+        "integer": ParamType.INTEGER,
+        "float": ParamType.FLOAT,
+        "boolean": ParamType.BOOLEAN,
+        "select": ParamType.SELECT,
+    }
     inputs_elem = root.find("inputs")
     if inputs_elem is not None:
-        for param in inputs_elem.findall("param"):
-            inp_name = param.get("name", "")
-            if not inp_name:
-                continue
-            inp_type = param.get("type", "text")
-            inp_format = "any"
-            if inp_type == "data":
-                inp_format = param.get("format", "any")
-            inputs[inp_name] = ToolInput(
-                name=inp_name,
-                type=ParamType.FILE,
-                format=inp_format,
-            )
+        for pname, param in _walk_params(inputs_elem):
+            ptype = param.get("type", "text")
+            if ptype in ("data", "data_collection"):
+                inputs[pname] = ToolInput(
+                    name=pname,
+                    type=ParamType.FILE,
+                    format=param.get("format", "any"),
+                )
+            else:
+                options = [
+                    opt.get("value", "")
+                    for opt in param.findall("option")
+                ] if ptype == "select" else None
+                parameters[pname] = ToolParameter(
+                    name=pname,
+                    type=_param_types.get(ptype, ParamType.STRING),
+                    default=param.get("value") or None,
+                    required=False,
+                    options=options or None,
+                )
 
     # Extract outputs from <outputs><data> elements
     outputs: dict[str, ToolOutput] = {}
@@ -255,5 +320,6 @@ def parse_tool_to_spec(tool_dir: Path) -> ExecutionSpec:
         command=command,
         inputs=inputs,
         outputs=outputs,
+        parameters=parameters,
         executors=["galaxy"],
     )

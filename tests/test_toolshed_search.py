@@ -60,49 +60,81 @@ class TestSearchToolshed:
         assert results == []
 
 
+def _install_info(*tool_ids: str):
+    """Build a real-shaped install_info payload: [repo, metadata, tools]."""
+    return [
+        {"model_class": "Repository", "name": "bowtie2"},
+        {
+            "model_class": "RepositoryMetadata",
+            "changeset_revision": "abc123",
+            "valid_tools": [
+                {
+                    "id": tid,
+                    "name": tid.title(),
+                    "guid": (
+                        "toolshed.g2.bx.psu.edu/repos/devteam/bowtie2"
+                        f"/{tid}/2.5.5+galaxy0"
+                    ),
+                }
+                for tid in tool_ids
+            ],
+        },
+        {},
+    ]
+
+
+def _tool_source_resp(tool_id: str = "bowtie2"):
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.text = f"<tool id='{tool_id}'/>"
+    resp.raise_for_status = lambda: None
+    return resp
+
+
 class TestDownloadTool:
     def test_download_tool_creates_dir(self, tmp_path):
-        """download_tool() should create the destination directory."""
-        mock_module, mock_toolshed, mock_ts_cls = _mock_bioblend()
-        mock_ts = MagicMock()
-        mock_ts_cls.return_value = mock_ts
-        mock_ts.repositories.show_repository.return_value = {
-            "repo_revisions": [{"changeset_revision": "abc123"}]
-        }
-        mock_ts.repositories.get_repository_revision_install_info.return_value = [
-            {"file_path": "bowtie2.xml"},
-            {"file_path": "macros.xml"},
-        ]
-        with (
-            patch.dict(sys.modules, {"bioblend": mock_module, "bioblend.toolshed": mock_toolshed}),
-            patch("httpx.get") as mock_get,
-        ):
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.content = b"<tool id='test'/>"
-            mock_get.return_value = mock_resp
+        """download_tool() resolves latest revision and fetches tool_source."""
+        json_resp = MagicMock()
+        json_resp.status_code = 200
+        json_resp.raise_for_status = lambda: None
+
+        def fake_get(url, **kwargs):
+            if "get_ordered_installable_revisions" in url:
+                json_resp.json = lambda: ["abc123", "def456"]
+                return json_resp
+            if "get_repository_revision_install_info" in url:
+                json_resp.json = lambda: _install_info("bowtie2")
+                return json_resp
+            if "tool_source" in url:
+                return _tool_source_resp("bowtie2")
+            raise AssertionError(f"unexpected URL {url}")
+
+        with patch("httpx.get", side_effect=fake_get) as mock_get:
             dest, rev = download_tool("devteam", "bowtie2", dest_dir=tmp_path)
         assert dest.exists()
         assert dest == tmp_path
-        assert rev == "abc123"
-        assert mock_get.call_count == 2
+        # Latest installable revision is the last element
+        assert rev == "def456"
+        assert (dest / "bowtie2.xml").exists()
+        assert mock_get.call_count == 3
 
     def test_download_tool_with_pinned_revision(self, tmp_path):
-        """download_tool() with revision should use it directly."""
-        mock_module, mock_toolshed, mock_ts_cls = _mock_bioblend()
-        mock_ts = MagicMock()
-        mock_ts_cls.return_value = mock_ts
-        mock_ts.repositories.get_repository_revision_install_info.return_value = [
-            {"file_path": "bowtie2.xml"},
-        ]
-        with (
-            patch.dict(sys.modules, {"bioblend": mock_module, "bioblend.toolshed": mock_toolshed}),
-            patch("httpx.get") as mock_get,
-        ):
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.content = b"<tool id='test'/>"
-            mock_get.return_value = mock_resp
+        """download_tool() with revision skips the revisions lookup."""
+        json_resp = MagicMock()
+        json_resp.status_code = 200
+        json_resp.raise_for_status = lambda: None
+
+        def fake_get(url, **kwargs):
+            if "get_ordered_installable_revisions" in url:
+                raise AssertionError("should not fetch revisions when pinned")
+            if "get_repository_revision_install_info" in url:
+                json_resp.json = lambda: _install_info("bowtie2")
+                return json_resp
+            if "tool_source" in url:
+                return _tool_source_resp("bowtie2")
+            raise AssertionError(f"unexpected URL {url}")
+
+        with patch("httpx.get", side_effect=fake_get):
             dest, rev = download_tool(
                 "devteam", "bowtie2",
                 revision="def456",
@@ -110,8 +142,22 @@ class TestDownloadTool:
             )
         assert dest.exists()
         assert rev == "def456"
-        # Should not call show_repository when revision is given
-        mock_ts.repositories.show_repository.assert_not_called()
+        assert (dest / "bowtie2.xml").exists()
+
+    def test_download_tool_no_valid_tools_raises(self, tmp_path):
+        """A revision with no valid_tools is a hard error, not an empty dir."""
+        json_resp = MagicMock()
+        json_resp.status_code = 200
+        json_resp.raise_for_status = lambda: None
+        json_resp.json = lambda: [{"name": "x"}, {"valid_tools": []}, {}]
+
+        with patch("httpx.get", return_value=json_resp):
+            with pytest.raises(RuntimeError, match="no valid tools"):
+                download_tool(
+                    "devteam", "bowtie2",
+                    revision="abc123",
+                    dest_dir=tmp_path,
+                )
 
 
 class TestParseToolToSpec:

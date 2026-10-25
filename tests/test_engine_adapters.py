@@ -134,7 +134,11 @@ output:
 
     def test_parse_meta_yml_missing_file(self, tmp_path):
         result = parse_meta_yml(tmp_path)
-        assert result == {"inputs": [], "outputs": {}, "container": ""}
+        assert result["inputs"] == []
+        assert result["outputs"] == {}
+        assert result["container"] == ""
+        assert result["input_channels"] == []
+        assert result["parameters"] == {}
 
     def test_parse_meta_yml_empty_sections(self, tmp_path):
         meta_content = """\

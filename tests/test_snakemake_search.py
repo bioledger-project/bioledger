@@ -16,67 +16,65 @@ from bioledger.core.engines.snakemake_search import (
 )
 
 
-class TestSearchWrappers:
-    def test_search_returns_results(self):
-        """search_wrappers() should return SnakemakeWrapperResult objects."""
-        # Mock: top-level dirs (bio, utils), then bio/samtools has subdirs (sort)
-        responses = [
-            # 1. List top-level dirs
-            [{"name": "bio", "type": "dir"}, {"name": "utils", "type": "dir"}],
-            # 2. List bio/ contents
-            [{"name": "samtools", "type": "dir"}],
-            # 3. List bio/samtools/ contents — subdirs = individual wrappers
-            [{"name": "sort", "type": "dir"}],
-            # 4. List utils/ contents — no subdirs, the dir itself is a wrapper
-            [{"name": "someutil", "type": "dir"}],
-            # 5. List bio/samtools/sort/ contents — has subdirs
-            [{"name": "wrapper.py", "type": "file"}],
-            # 6. List utils/someutil/ contents — no subdirs
-            [{"name": "wrapper.py", "type": "file"}],
-        ]
-        mock_responses = [MagicMock(status_code=200, json=lambda r=r: r) for r in responses]
-        with patch("httpx.get", side_effect=mock_responses):
-            results = search_wrappers("samtools")
-        assert len(results) == 1
-        assert results[0].name == "sort"
-        assert results[0].path == "bio/samtools/sort"
+def _tree_payload(*paths: str) -> dict:
+    return {"tree": [{"path": p, "type": "blob"} for p in paths]}
 
-    def test_search_no_matches(self):
-        """search_wrappers() should return empty list for no matches."""
-        responses = [
-            [{"name": "bio", "type": "dir"}],
-            [{"name": "samtools", "type": "dir"}],
-            [{"name": "sort", "type": "dir"}],
-            [{"name": "wrapper.py", "type": "file"}],
+
+class TestSearchWrappers:
+    def test_search_returns_results(self, tmp_path):
+        """search_wrappers() uses the git Trees API; dirs with wrapper.py."""
+        tree = _tree_payload(
+            "bio/samtools/sort/wrapper.py",
+            "bio/samtools/sort/meta.yaml",
+            "bio/samtools/view/wrapper.py",
+            "bio/bgzip/test/Snakefile",  # not a wrapper — no wrapper.py
+            "docs/index.md",
+        )
+        resp = MagicMock(status_code=200, json=lambda: tree)
+        with (
+            patch("bioledger.core.engines.snakemake_search._CACHE_DIR", tmp_path),
+            patch("httpx.get", return_value=resp),
+        ):
+            results = search_wrappers("samtools")
+        assert sorted(r.path for r in results) == [
+            "bio/samtools/sort", "bio/samtools/view",
         ]
-        mock_responses = [MagicMock(status_code=200, json=lambda r=r: r) for r in responses]
-        with patch("httpx.get", side_effect=mock_responses):
+        assert all(isinstance(r, SnakemakeWrapperResult) for r in results)
+
+    def test_search_no_matches(self, tmp_path):
+        """search_wrappers() should return empty list for no matches."""
+        tree = _tree_payload("bio/samtools/sort/wrapper.py")
+        resp = MagicMock(status_code=200, json=lambda: tree)
+        with (
+            patch("bioledger.core.engines.snakemake_search._CACHE_DIR", tmp_path),
+            patch("httpx.get", return_value=resp),
+        ):
             results = search_wrappers("nonexistent_tool")
         assert results == []
 
 
 class TestDownloadWrapper:
     def test_download_wrapper_creates_files(self, tmp_path):
-        """download_wrapper() should download meta.yaml and test/Snakefile."""
+        """download_wrapper() resolves master→SHA and downloads files."""
         def mock_get(url, **kwargs):
             resp = MagicMock()
             resp.status_code = 200
-            if "meta.yaml" in url:
+            if "commits/master" in url:
+                resp.json.return_value = {"sha": "deadbeef"}
+                resp.raise_for_status = lambda: None
+            elif "meta.yaml" in url:
                 resp.text = "name: samtools sort\ndescription: Sort bam file"
             elif "environment.yaml" in url:
                 resp.text = "channels:\n  - bioconda"
+            elif "wrapper.py" in url:
+                resp.text = "assert snakemake"
             elif "test/Snakefile" in url:
                 resp.text = "rule samtools_sort:\n  input:\n    \"mapped/{sample}.bam\""
-            elif "commits/master" in url:
-                resp.json.return_value = {"sha": "deadbeef"}
-                resp.text = "{}"
             else:
                 resp.status_code = 404
             return resp
 
-        with (
-            patch("httpx.get", side_effect=mock_get),
-        ):
+        with patch("httpx.get", side_effect=mock_get):
             dest, rev = download_wrapper(
                 "bio/samtools/sort",
                 dest_dir=tmp_path,
@@ -87,20 +85,46 @@ class TestDownloadWrapper:
         assert rev == "deadbeef"
 
     def test_download_wrapper_with_pinned_revision(self, tmp_path):
-        """download_wrapper() with revision should use it as the ref."""
+        """download_wrapper() resolves a pinned tag/branch to a SHA."""
         def mock_get(url, **kwargs):
             resp = MagicMock()
             resp.status_code = 200
-            resp.text = "name: test"
+            if "commits/v7.1.0" in url:
+                resp.json.return_value = {"sha": "cafe" * 10}
+                resp.raise_for_status = lambda: None
+            else:
+                resp.text = "x: 1"
             return resp
 
         with patch("httpx.get", side_effect=mock_get):
             dest, rev = download_wrapper(
                 "bio/samtools/sort",
-                revision="abc123",
+                revision="v7.1.0",
                 dest_dir=tmp_path,
             )
-        assert rev == "abc123"
+        assert rev == "cafe" * 10
+        # Files fetched under the resolved SHA
+        assert (dest / "test_Snakefile").exists()
+
+    def test_download_wrapper_404_on_snakefile_raises(self, tmp_path):
+        """A missing test/Snakefile must raise, not produce an empty dir."""
+        def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            if "commits/" in url:
+                resp.json.return_value = {"sha": "deadbeef"}
+                resp.raise_for_status = lambda: None
+            elif "test/Snakefile" in url:
+                resp.status_code = 404
+            else:
+                resp.text = "x: 1"
+            return resp
+
+        with (
+            patch("httpx.get", side_effect=mock_get),
+            pytest.raises(RuntimeError, match="404"),
+        ):
+            download_wrapper("bio/bogus/tool", dest_dir=tmp_path)
 
 
 class TestParseWrapperToSpec:
@@ -193,6 +217,54 @@ class TestParseWrapperToSpec:
         assert spec.name == "bio_test"
         assert spec.inputs == {}
         assert spec.outputs == {}
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "snakemake"
+
+
+class TestParseRealFixtures:
+    """Parse real snakemake-wrappers test/Snakefiles (keyword syntax,
+    multi-line calls, multi-rule files with use-rule variants)."""
+
+    def test_bowtie2_align_fixture(self):
+        spec = parse_wrapper_to_spec(
+            FIXTURES / "bowtie2_align", "bio/bowtie2/align",
+        )
+        # First rule containing wrapper: is selected (file has 4 rules +
+        # a `use rule ... with:` variant sharing the same interface)
+        assert spec.inputs["sample"].collection is True
+        assert "idx" in spec.inputs
+        assert spec.inputs["idx"].collection is False
+        # multiext(...) is one named input, not six bogus positionals
+        assert set(spec.inputs) == {"sample", "idx"}
+        assert "extra" in spec.parameters
+        # threads >= 2 required by this wrapper
+        assert spec.parameters["threads"].default == 8
+        # {sample} wildcards concretized for standalone runs
+        assert all("{" not in o.pattern for o in spec.outputs.values())
+
+    def test_samtools_sort_fixture(self):
+        spec = parse_wrapper_to_spec(
+            FIXTURES / "samtools_sort", "bio/samtools/sort",
+        )
+        assert set(spec.inputs) == {"input_0"}
+        assert spec.parameters["mem"].default == "64G"
+        assert spec.parameters["extra"].default == ""
+        assert spec.parameters["threads"].default == 8
+        assert spec.outputs["output_0"].pattern == "mapped/out.sorted.bam"
+
+    def test_generated_snakefile_threads_and_list_inputs(self):
+        """threads is a directive (>=2, config-overridable); lists stay lists."""
+        spec = parse_wrapper_to_spec(
+            FIXTURES / "bowtie2_align", "bio/bowtie2/align",
+        )
+        sf = generate_wrapper_snakefile("bio/bowtie2/align", spec, "abc123")
+        assert "threads: max(2, config.get('threads', 8))" in sf
+        assert "sample=config.get('sample', [])" in sf
+        # threads must NOT leak into the params: block
+        params_idx = sf.index("params:")
+        threads_idx = sf.index("threads:")
+        assert "threads=config" not in sf[params_idx:threads_idx]
 
 
 class TestGenerateWrapperSnakefile:

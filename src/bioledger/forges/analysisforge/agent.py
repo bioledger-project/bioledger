@@ -1301,6 +1301,7 @@ class AnalysisForgeAgent:
                 ParamType,
                 ToolInput,
                 ToolOutput,
+                ToolParameter,
             )
 
             derived_name = subdir.replace("/", "_")
@@ -1315,6 +1316,26 @@ class AnalysisForgeAgent:
                 )
                 for name, pattern in meta["outputs"].items()
             }
+            # val channels (e.g. bowtie2's save_unaligned/sort_bam) are
+            # overridable params — defaults live in the generated config.
+            param_type_map = {
+                "boolean": ParamType.BOOLEAN,
+                "integer": ParamType.INTEGER,
+                "float": ParamType.FLOAT,
+                "string": ParamType.STRING,
+            }
+            parameters = {
+                ch["name"]: ToolParameter(
+                    name=ch["name"],
+                    type=param_type_map.get(
+                        ch.get("type", "string"), ParamType.STRING
+                    ),
+                    default=ch.get("default"),
+                    required=False,
+                )
+                for ch in meta.get("input_channels", [])
+                if ch.get("kind") == "val"
+            }
             spec = ExecutionSpec(
                 name=tool_name or derived_name,
                 version="",
@@ -1323,6 +1344,7 @@ class AnalysisForgeAgent:
                 command="",  # Set below after entry creation
                 inputs=inputs,
                 outputs=outputs,
+                parameters=parameters,
                 executors=["nextflow"],
             )
             engine = "nextflow"
@@ -1391,13 +1413,16 @@ class AnalysisForgeAgent:
             config_args = []
             for name in spec.inputs:
                 if name in input_mapping:
+                    # Double-quoted whole k=v so paths with spaces stay a
+                    # single --config arg (no shquote — outer quotes are
+                    # already consumed by the shell).
                     config_args.append(
-                        f"{name}={{{{ inputs.{name} }}}}"
+                        f'{name}="{{{{ inputs.{name} }}}}"'
                     )
             for name in spec.parameters:
                 if name in params:
                     config_args.append(
-                        f"{name}={{{{ parameters.{name} }}}}"
+                        f'{name}="{{{{ parameters.{name} }}}}"'
                     )
             config_str = (
                 f"--config {' '.join(config_args)}"
