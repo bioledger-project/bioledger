@@ -18,7 +18,6 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from bioledger.forges.analysisforge.crystallize import (
-    _build_dag,
     to_nextflow_from_entries,
 )
 from bioledger.forges.analysisforge.executor import (
@@ -351,34 +350,6 @@ class TestRunToolTimeout:
 
 class TestCrystallizeFiltering:
     """T4/S5: crystallize should only include completed/failed entries."""
-
-    def test_build_dag_skips_running_entries(self):
-        session = LedgerSession()
-        completed = LedgerEntry(
-            id="e1",
-            kind=EntryKind.TOOL_RUN,
-            run_status="completed",
-            tool_spec_name="tool-a",
-        )
-        running = LedgerEntry(
-            id="e2",
-            kind=EntryKind.TOOL_RUN,
-            run_status="running",
-            tool_spec_name="tool-b",
-            parent_id="e1",
-        )
-        unknown = LedgerEntry(
-            id="e3",
-            kind=EntryKind.TOOL_RUN,
-            run_status="unknown",
-            tool_spec_name="tool-c",
-        )
-        session.entries = [completed, running, unknown]
-
-        children, by_id = _build_dag(session)
-        assert "e1" in by_id
-        assert "e2" not in by_id
-        assert "e3" not in by_id
 
     def test_to_nextflow_from_entries_skips_non_terminal(self):
         completed = LedgerEntry(

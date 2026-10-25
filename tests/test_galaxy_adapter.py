@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bioledger.core.engines.config import GalaxyEngineConfig
 from bioledger.core.engines.dispatch import _adapter_registry, dispatch
 from bioledger.core.engines.galaxy_adapter import GalaxyAdapter
 from bioledger.core.engines.protocol import RunHandle
@@ -62,47 +60,16 @@ class TestGalaxyGenerate:
             adapter.generate(spec=spec, input_mapping={"bam": "data/*.bam"})
 
 
-class TestGalaxyToolAvailability:
-    def test_planemo_mode_skips_check(self):
-        """In planemo mode, tool availability check is a no-op (logs only)."""
-        config = GalaxyEngineConfig(mode="planemo")
-        adapter = GalaxyAdapter(config)
-        # Should not raise
-        adapter._check_tool_availability("samtools_sort")
+class TestGalaxySubmit:
+    """Fan-out submit() is unreachable — generate() always raises."""
 
-    def test_remote_mode_checks_tool_panel(self):
-        """In remote mode, tool availability is checked via bioblend."""
-        config = GalaxyEngineConfig(
-            mode="remote", url="http://galaxy.example", api_key=""
-        )
-        adapter = GalaxyAdapter(config)
-        mock_client = MagicMock()
-        mock_client.tools.get_tools.return_value = [
-            {"id": "samtools_sort"},
-            {"id": "bwa_mem"},
-        ]
-        adapter._bioblend_client = mock_client
-        # Should not raise — tool is available
-        adapter._check_tool_availability("samtools_sort")
-
-    def test_remote_mode_raises_for_missing_tool(self):
-        """In remote mode, missing tool raises RuntimeError — no Docker fallback."""
-        config = GalaxyEngineConfig(
-            mode="remote", url="http://galaxy.example", api_key=""
-        )
-        adapter = GalaxyAdapter(config)
-        mock_client = MagicMock()
-        mock_client.tools.get_tools.return_value = [
-            {"id": "bwa_mem"},
-        ]
-        adapter._bioblend_client = mock_client
-        try:
-            adapter._check_tool_availability("nonexistent_tool")
-            assert False, "Should have raised RuntimeError"
-        except RuntimeError as e:
-            assert "nonexistent_tool" in str(e)
-            assert "not available" in str(e)
-            assert "No Docker fallback" in str(e)
+    def test_submit_raises_deferred(self):
+        adapter = GalaxyAdapter()
+        handle = MagicMock()
+        with pytest.raises(NotImplementedError, match="Galaxy fan-out"):
+            adapter.submit(
+                handle=handle, input_mapping={}, params={}, work_dir=Path("/tmp")
+            )
 
 
 class TestGalaxyPoll:
@@ -190,77 +157,16 @@ class TestGalaxyPoll:
 
 
 class TestGalaxyCollect:
-    def test_collect_planemo_via_bioblend(self):
-        """Planemo mode now collects outputs via bioblend."""
-        adapter = GalaxyAdapter()  # default mode=planemo
-        mock_gi = MagicMock()
-        mock_gi.workflows.show_invocation.return_value = {
-            "history_id": "hist-123"
-        }
-        mock_gi.histories.show_history.return_value = [
-            {"state": "ok", "file_name": "/tmp/out1.bam", "name": "out1", "file_size": 100},
-            {"state": "error", "file_name": "/tmp/out2.bam", "name": "out2", "file_size": 50},
-        ]
-        with (
-            patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi),
-            patch.object(adapter, "_shutdown_planemo") as mock_shutdown,
-        ):
-            handle = RunHandle(
-                executor="galaxy",
-                run_id="inv-123",
-                entry_id="",
-                work_dir=Path("/tmp"),
-            )
-            outputs = adapter.collect(handle)
-        assert len(outputs) == 1
-        assert outputs[0]["name"] == "out1"
-        mock_shutdown.assert_called_once_with(handle)
-
-    def test_collect_planemo_empty(self):
-        """Planemo mode with no outputs returns empty list."""
+    def test_collect_returns_empty(self):
+        """Local-run outputs are file-discovered — collect() is a no-op."""
         adapter = GalaxyAdapter()
-        mock_gi = MagicMock()
-        mock_gi.workflows.show_invocation.return_value = {
-            "history_id": "hist-456"
-        }
-        mock_gi.histories.show_history.return_value = []
-        with (
-            patch.object(adapter, "_get_galaxy_instance", return_value=mock_gi),
-            patch.object(adapter, "_shutdown_planemo"),
-        ):
-            handle = RunHandle(
-                executor="galaxy",
-                run_id="inv-456",
-                entry_id="",
-                work_dir=Path("/tmp"),
-            )
-            outputs = adapter.collect(handle)
-        assert outputs == []
-
-    def test_collect_remote_via_bioblend(self):
-        config = GalaxyEngineConfig(
-            mode="remote", url="http://galaxy.example", api_key=""
-        )
-        adapter = GalaxyAdapter(config)
-        mock_client = MagicMock()
-        mock_client.workflows.show_invocation.return_value = {
-            "history_id": "hist-123"
-        }
-        mock_client.histories.show_history.return_value = [
-            {"state": "ok", "file_name": "/tmp/out1.bam", "name": "out1", "file_size": 100},
-            {"state": "error", "file_name": "/tmp/out2.bam", "name": "out2", "file_size": 50},
-        ]
-        adapter._bioblend_client = mock_client
         handle = RunHandle(
             executor="galaxy",
-            run_id="inv-123",
+            run_id="12345",
             entry_id="",
             work_dir=Path("/tmp"),
         )
-        outputs = adapter.collect(handle)
-        # Only state=ok datasets should be collected
-        assert len(outputs) == 1
-        assert outputs[0]["name"] == "out1"
+        assert adapter.collect(handle) == []
 
 
 class TestGalaxyDispatch:

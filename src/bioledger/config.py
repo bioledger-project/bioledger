@@ -29,6 +29,12 @@ class BioLedgerConfig(BaseSettings):
         """If BIOLEDGER_DEFAULT_MODEL is set, override llm.default_model
         and all task_models to use the same provider."""
         if self.default_model:
+            # A bare model name (no 'provider:' prefix) inherits the
+            # provider of the existing default — 'gpt-4o-mini' →
+            # 'openai:gpt-4o-mini', not an invalid provider-less string.
+            if ":" not in self.default_model:
+                provider = self.llm.default_model.split(":", 1)[0]
+                self.default_model = f"{provider}:{self.default_model}"
             old_default = self.llm.default_model
             self.llm.default_model = self.default_model
             for task, model in self.llm.task_models.items():

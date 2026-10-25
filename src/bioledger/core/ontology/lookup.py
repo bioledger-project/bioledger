@@ -28,7 +28,12 @@ def _read_cache(key: str) -> list[dict] | None:
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = _CACHE_DIR / f"{key}.json"
     if path.exists():
-        data = json.loads(path.read_text())
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            # Corrupt cache file — quarantine it rather than failing
+            path.unlink(missing_ok=True)
+            return None
         if time.time() - data.get("ts", 0) < _CACHE_TTL:
             return data["results"]
     return None
@@ -87,7 +92,10 @@ async def search_ontology(
             }
         )
 
-    _write_cache(key, results)
+    # Don't cache empty results — a transient OLS outage or unlucky
+    # query shouldn't poison the cache for a week.
+    if results:
+        _write_cache(key, results)
     return results
 
 
@@ -123,21 +131,24 @@ async def search_with_reformulation(
         output_type=str,
     )
 
+    original_query = query
+    tried: list[str] = [query]
     for attempt in range(max_retries):
         prompt = (
-            f"Original query: '{query}'\n"
+            f"Original query: '{original_query}'\n"
             f"Ontology: {ontology}\n"
             f"Attempt {attempt + 1}/{max_retries}\n"
-            f"Previous queries that returned nothing: {query}\n"
+            f"Previous queries that returned nothing: "
+            f"{', '.join(repr(q) for q in tried)}\n"
             f"Suggest a better search query."
         )
         result = await reformulate_agent.run(prompt)
         new_query = result.output.strip().strip("'\"")
 
-        if new_query and new_query.lower() != query.lower():
+        if new_query and new_query.lower() not in {q.lower() for q in tried}:
             results = await search_ontology(new_query, ontology=ontology)
             if results:
                 return results
-            query = new_query  # track for next iteration
+            tried.append(new_query)
 
     return []  # all reformulations exhausted

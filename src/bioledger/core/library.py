@@ -59,7 +59,10 @@ class LibraryClient:
             logger.warning("Failed to fetch library index from %s: %s", self.url, e)
             # Fall back to stale cache if available
             if self.cache_path.exists():
-                entries = json.loads(self.cache_path.read_text())
+                try:
+                    entries = json.loads(self.cache_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    entries = []
             else:
                 entries = []
             self._entries = entries
@@ -75,8 +78,12 @@ class LibraryClient:
         if self._entries is not None:
             return self._entries
         if self._is_cache_fresh():
-            self._entries = json.loads(self.cache_path.read_text())
-            return self._entries
+            try:
+                self._entries = json.loads(self.cache_path.read_text())
+                return self._entries
+            except (json.JSONDecodeError, OSError):
+                # Corrupt cache — fall through to refresh()
+                pass
         return self.refresh()
 
 
@@ -220,7 +227,10 @@ class StudyLibrary:
             try:
                 resp = httpx.get(url, timeout=15, follow_redirects=True)
                 if resp.status_code == 200:
-                    (dest_dir / fname).write_text(resp.text)
+                    dest = dest_dir / fname
+                    # isa_files may carry subdirectories (e.g. "data/x.txt")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_text(resp.text)
                     logger.info("Downloaded %s for %s", fname, accession)
             except Exception:
                 logger.warning("Failed to fetch %s for %s", fname, accession)

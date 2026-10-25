@@ -78,12 +78,29 @@ class ToolForgeAgent:
     async def fix(
         self, spec: ExecutionSpec, issues: list[ValidationIssue], deps: ForgeDeps
     ) -> ExecutionSpec:
-        """LLM fixes validation issues in a spec."""
+        """LLM fixes validation issues in a spec.
+
+        Re-validates the LLM's output — a "fix" that leaves the spec
+        invalid raises rather than silently returning a bad spec.
+        """
+        from bioledger.toolspec.validate import Severity, validate_spec
+
         issues_str = "\n".join(f"- {i.field}: {i.message}" for i in issues)
         draft = ExecutionSpecDraft.from_execution_spec(spec)
         prompt = f"Fix these issues:\n{issues_str}\n\nSpec:\n{draft.model_dump_json(indent=2)}"
         result = await self._fix_agent.run(prompt, deps=deps)
-        return result.output.to_execution_spec()
+        fixed = result.output.to_execution_spec()
+
+        remaining = validate_spec(fixed)
+        if not remaining.is_valid:
+            still_bad = "\n".join(
+                f"- {i.field}: {i.message}" for i in remaining.issues
+                if i.severity == Severity.ERROR
+            )
+            raise ValueError(
+                f"LLM fix left the spec invalid:\n{still_bad}"
+            )
+        return fixed
 
     async def review(
         self, spec: ExecutionSpec, source: str, deps: ForgeDeps

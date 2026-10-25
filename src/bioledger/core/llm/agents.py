@@ -17,6 +17,18 @@ from bioledger.ledger.models import LedgerSession
 from bioledger.ledger.store import LedgerStore
 
 
+def format_output_listing(paths: list[str], max_shown: int = 10) -> str:
+    """Format an output-file list for LLM context, capping long lists.
+
+    Shared by ``ForgeDeps.session_summary`` and the agent's per-entry
+    summary so fan-out runs (500-gene scatter) don't blow the prompt.
+    """
+    names = [p.rsplit("/", 1)[-1] for p in paths]
+    if len(names) > max_shown:
+        return f"{', '.join(names[:max_shown])} ... ({len(names)} total)"
+    return ", ".join(names) or "no output files"
+
+
 @dataclass
 class ForgeDeps:
     """Shared dependencies injected into every forge agent."""
@@ -47,7 +59,6 @@ class ForgeDeps:
     def session_summary(self) -> str:
         """One-paragraph summary of what happened in this session so far.
         Useful as a system-prompt prefix for conversational agents."""
-        _MAX_OUTPUTS = 10
         entries = self.session.entries
         if not entries:
             return "This is a new session with no prior actions."
@@ -56,15 +67,9 @@ class ForgeDeps:
         for e in tool_runs[-3:]:  # last 3 tool runs
             name = e.tool_spec_name or "unknown"
             out_files = [f.path for f in e.files if f.role == "output"]
-            if len(out_files) > _MAX_OUTPUTS:
-                shown = ", ".join(out_files[:_MAX_OUTPUTS])
-                last_outputs.append(
-                    f"{name} → {shown} ... ({len(out_files)} total)"
-                )
-            else:
-                last_outputs.append(
-                    f"{name} → {', '.join(out_files) or 'no output files'}"
-                )
+            last_outputs.append(
+                f"{name} → {format_output_listing(out_files)}"
+            )
         summary = (
             f"Session '{self.session.name or self.session.id}' has "
             f"{len(entries)} entries ({len(tool_runs)} tool/script runs). "
@@ -94,4 +99,9 @@ def make_agent(
         instructions=instructions,
         tools=tools or [],
         output_type=output_type or str,
+        model_settings={
+            "temperature": config.llm.temperature,
+            "max_tokens": config.llm.max_tokens,
+            "timeout": config.llm.provider.api_timeout,
+        },
     )

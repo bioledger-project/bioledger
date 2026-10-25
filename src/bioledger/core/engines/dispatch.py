@@ -68,18 +68,14 @@ def _detect_installed_engine() -> str | None:
     Returns the engine name, or None if none found.
     """
     for engine in ("nextflow", "snakemake", "galaxy"):
-        if shutil.which(engine) is not None:
+        # galaxy is driven via planemo — there is no `galaxy` binary
+        binary = "planemo" if engine == "galaxy" else engine
+        if shutil.which(binary) is not None:
             return engine
         # Also check if the pip extra is installed
         try:
             if engine == "snakemake":
                 import snakemake  # noqa: F401
-                return engine
-            elif engine == "nextflow":
-                # nextflow is a Java binary, not a Python package
-                pass
-            elif engine == "galaxy":
-                import galaxy.tool_util  # noqa: F401
                 return engine
         except ImportError:
             pass
@@ -138,7 +134,11 @@ def dispatch(
         ValueError: If the spec has no usable executors or the engine
             override conflicts with the spec's executors.
     """
-    executors = getattr(spec, "executors", ["docker"])
+    # spec.executors may be None (attribute unset → docker default);
+    # an explicit empty list is a misconfiguration → error below.
+    executors = getattr(spec, "executors", None)
+    if executors is None:
+        executors = ["docker"]
     engine_executors = [e for e in executors if e in ("nextflow", "snakemake", "galaxy")]
 
     # Validate engine config for container tech mismatches

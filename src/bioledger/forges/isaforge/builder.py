@@ -63,8 +63,14 @@ def create_investigation(spec: ISAStudySpec) -> Investigation:
     for src_spec in spec.sources:
         source = Source(name=src_spec.name)
         for char in src_spec.characteristics:
+            # isatools expects Characteristic(category, value) — a bare
+            # OntologyAnnotation silently produces no Characteristics[]
+            # column in s_study.txt.
             source.characteristics.append(
-                OntologyAnnotation(term=char.term, term_source=None)
+                Characteristic(
+                    category=OntologyAnnotation(term="Organism"),
+                    value=OntologyAnnotation(term=char.term, term_source=None),
+                )
             )
         study.sources.append(source)
 
@@ -161,7 +167,29 @@ async def csv_to_isatab(
     assay_protocol.protocol_type = OntologyAnnotation(term=technology_type, term_source=obi)
     study.protocols = [sample_collection_protocol, assay_protocol]
 
-    # Build sources and samples with LLM-assisted organism lookup
+    # Build sources and samples with LLM-assisted organism lookup.
+    # Resolve each UNIQUE organism string once — a 500-row samplesheet
+    # typically has 1-3 distinct organisms, not 500 LLM calls.
+    organism_terms: dict[str, str] = {}
+    if config and parsed.organism_col:
+        org_agent, org_deps = _make_organism_agent(config)
+        for row in parsed.rows:
+            org_raw = row.get(parsed.organism_col, "").strip()
+            if org_raw and org_raw not in organism_terms:
+                try:
+                    organism_terms[org_raw] = await _llm_organism_lookup(
+                        org_raw, org_agent, org_deps
+                    )
+                except Exception as e:
+                    # LLM lookup is best-effort — fall back to the raw
+                    # value rather than failing the whole conversion.
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Organism lookup failed for %r (%s) — using raw value",
+                        org_raw, e,
+                    )
+                    organism_terms[org_raw] = org_raw
+
     organism_cat = OntologyAnnotation(term="Organism")
     sources: list[Source] = []
     samples: list[Sample] = []
@@ -178,14 +206,7 @@ async def csv_to_isatab(
         source = Source(name=f"source_{sample_name}")
         if parsed.organism_col:
             org_raw = row.get(parsed.organism_col, "").strip()
-            if org_raw and config:
-                # LLM-assisted ontology lookup
-                org_term = await _llm_organism_lookup(org_raw, config)
-            elif org_raw:
-                # Fallback: use raw value with generic term source
-                org_term = org_raw
-            else:
-                org_term = None
+            org_term = organism_terms.get(org_raw) or (org_raw or None)
 
             if org_term:
                 char = Characteristic(
@@ -256,12 +277,15 @@ async def csv_to_isatab(
     return output_dir
 
 
-async def _llm_organism_lookup(organism_raw: str, config: BioLedgerConfig) -> str:
-    """Use LLM to lookup organism in NCBITaxon ontology.
+def _make_organism_agent(config: BioLedgerConfig):
+    """Build the organism-lookup agent + deps once per conversion.
 
-    Returns the best matching ontology term label.
+    Returns (agent, deps) so callers can reuse the agent across every
+    row's organism instead of rebuilding it per row.
     """
     from pydantic import BaseModel
+
+    from bioledger.ledger.models import LedgerSession
 
     class OrganismResult(BaseModel):
         organism_label: str
@@ -292,8 +316,18 @@ async def _llm_organism_lookup(organism_raw: str, config: BioLedgerConfig) -> st
             f"- {r['label']} ({r['iri']})" for r in results[:5]
         )
 
+    deps = ForgeDeps(session=LedgerSession(), config=config)
+    return agent, deps
+
+
+async def _llm_organism_lookup(organism_raw: str, agent, deps: ForgeDeps) -> str:
+    """Use LLM to lookup organism in NCBITaxon ontology.
+
+    Returns the best matching ontology term label.
+    """
     result = await agent.run(
         f"Find the NCBITaxon ontology term for: '{organism_raw}'",
+        deps=deps,
     )
     return result.output.organism_label
 
@@ -326,10 +360,13 @@ async def _llm_assay_inference(
         output_type=AssayTypeResult,
     )
 
+    from bioledger.ledger.models import LedgerSession
+
     formats_str = ", ".join(file_formats)
     result = await agent.run(
         f"File formats detected: {formats_str}. What are the appropriate "
         f"ISA-Tab measurement type and technology type?",
+        deps=ForgeDeps(session=LedgerSession(), config=config),
     )
     return {
         "measurement_type": result.output.measurement_type,

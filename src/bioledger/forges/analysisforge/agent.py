@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib
+import importlib.util
 import logging
 import shutil
 from enum import Enum
@@ -761,6 +761,17 @@ class AnalysisForgeAgent:
                     for name, inp in t.execution.inputs.items()
                 )
             tools_details.append(f"- {t.name}: {t.execution.description}{inputs_info}")
+
+        # Also surface library tools (cached index only — no network
+        # fetch in the chat path). get_tool_spec() auto-imports them on
+        # selection, so the LLM may legitimately pick them.
+        local_names = {t.name for t in available_tools}
+        for entry in self._tool_library.list_cached():
+            if entry.get("name") and entry["name"] not in local_names:
+                desc = entry.get("description", "")[:80]
+                tools_details.append(
+                    f"- {entry['name']}: {desc} [library — auto-imported on use]"
+                )
         tools_summary = "\n".join(tools_details)
 
         # Recent tool/script outputs with their entry IDs (most recent first).
@@ -1026,19 +1037,16 @@ class AnalysisForgeAgent:
         token blowup on fan-out runs (e.g. 500-gene scatter → one entry
         with 500 output files).
         """
-        _MAX_OUTPUTS = 10
+        from bioledger.core.llm.agents import format_output_listing
+
         lines = []
         for entry in self.session.entries:
             if entry.kind == EntryKind.TOOL_RUN:
-                out_files = [
-                    Path(f.path).name for f in entry.files if f.role == "output"
-                ]
-                if len(out_files) > _MAX_OUTPUTS:
-                    total = len(out_files)
-                    shown = ", ".join(out_files[:_MAX_OUTPUTS])
-                    out_str = f"{shown} ... ({total} total)"
-                else:
-                    out_str = ", ".join(out_files)
+                out_str = format_output_listing(
+                    [f.path for f in entry.files if f.role == "output"]
+                )
+                if out_str == "no output files":
+                    out_str = ""
                 status = (
                     "running in background"
                     if entry.run_status == "running"
@@ -1061,17 +1069,16 @@ class AnalysisForgeAgent:
         """
         statuses: list[str] = []
         for engine in ("nextflow", "snakemake", "galaxy"):
-            binary_found = shutil.which(engine) is not None
+            # galaxy is driven via planemo — no `galaxy` binary exists
+            binary = "planemo" if engine == "galaxy" else engine
+            binary_found = shutil.which(binary) is not None
             pkg_installed = False
-            try:
-                if engine == "snakemake":
-                    import snakemake  # noqa: F401
-                    pkg_installed = True
-                elif engine == "galaxy":
-                    import galaxy.tool_util  # noqa: F401
-                    pkg_installed = True
-            except ImportError:
-                pass
+            if engine == "snakemake":
+                # find_spec checks installability without paying the
+                # (multi-second) `import snakemake` cost on every prompt
+                pkg_installed = (
+                    importlib.util.find_spec("snakemake") is not None
+                )
 
             if binary_found or pkg_installed:
                 parts = [engine, "installed"]

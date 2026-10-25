@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -10,45 +9,6 @@ from bioledger.ledger.models import EntryKind, LedgerEntry, LedgerSession
 from bioledger.toolspec import get_jinja_env
 
 logger = logging.getLogger(__name__)
-
-
-def _build_dag(
-    session: LedgerSession,
-) -> tuple[
-    dict[str | None, list[LedgerEntry]],  # parent_id → children
-    dict[str, LedgerEntry],  # id → entry
-]:
-    """Build adjacency list from parent_id links."""
-    children: dict[str | None, list[LedgerEntry]] = defaultdict(list)
-    by_id: dict[str, LedgerEntry] = {}
-    for entry in session.entries:
-        if entry.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN):
-            if entry.run_status not in ("completed", "failed"):
-                continue
-            children[entry.parent_id].append(entry)
-            by_id[entry.id] = entry
-    return children, by_id
-
-
-def _topological_order(
-    children: dict[str | None, list[LedgerEntry]],
-) -> list[LedgerEntry]:
-    """Topological sort respecting parent_id dependencies."""
-    visited: set[str] = set()
-    order: list[LedgerEntry] = []
-
-    def dfs(entry: LedgerEntry) -> None:
-        if entry.id in visited:
-            return
-        visited.add(entry.id)
-        for child in children.get(entry.id, []):
-            dfs(child)
-        order.append(entry)
-
-    # Start from root entries (parent_id is None)
-    for root_entry in children.get(None, []):
-        dfs(root_entry)
-    return list(reversed(order))
 
 
 def _build_output_source_map(
@@ -239,18 +199,17 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
         return "echo 'render failed'"
 
 
-def _make_engine_nf_process(proc: str, entry: LedgerEntry) -> str:
-    """Build a Nextflow process block for an engine executor entry.
+def _io_declarations(
+    entry: LedgerEntry,
+) -> tuple[list[str], list[str], list[str]]:
+    """Build Nextflow input/output declaration lines for an entry.
 
-    Handles snakemake, galaxy, and nextflow executors. These processes have
-    NO container or conda directive — the engine runs on the host and manages
-    its own containerized jobs. The script block invokes the engine CLI.
+    Returns (input_decls, output_decls, input_names). Input names prefer
+    the spec's declared inputs and fall back to the recovered volume
+    mapping; outputs prefer recorded filenames and fall back to spec
+    patterns. Shared by docker/conda and engine process builders.
     """
     spec = entry.tool_spec_snapshot or {}
-    executor = entry.executor or ""
-
-    # Input names: prefer the tool spec's declared inputs; fall back to the
-    # recovered mapping from container volumes.
     spec_inputs = spec.get("inputs") or {}
     input_map = _input_name_to_filename(entry)
     input_names = list(spec_inputs.keys()) or list(input_map.keys())
@@ -259,8 +218,6 @@ def _make_engine_nf_process(proc: str, entry: LedgerEntry) -> str:
     else:
         input_decls = [f"    path {name}" for name in input_names]
 
-    # Output declarations: prefer concrete filenames from the recorded run;
-    # fall back to tool spec patterns.
     output_files = _output_filenames(entry)
     if output_files:
         output_decls = [
@@ -274,6 +231,19 @@ def _make_engine_nf_process(proc: str, entry: LedgerEntry) -> str:
             output_decls.append(f"    path '{pattern}', emit: out{idx}")
         if not output_decls:
             output_decls = ["    path '*', emit: out0"]
+
+    return input_decls, output_decls, input_names
+
+
+def _make_engine_nf_process(proc: str, entry: LedgerEntry) -> str:
+    """Build a Nextflow process block for an engine executor entry.
+
+    Handles snakemake, galaxy, and nextflow executors. These processes have
+    NO container or conda directive — the engine runs on the host and manages
+    its own containerized jobs. The script block invokes the engine CLI.
+    """
+    executor = entry.executor or ""
+    input_decls, output_decls, input_names = _io_declarations(entry)
 
     # Build the engine invocation script.
     # For engine entries, the spec's command field contains the engine CLI
@@ -331,32 +301,10 @@ def _make_nf_process(proc: str, entry: LedgerEntry) -> str:
     else:
         env_line = f"    container '{image}'"
 
-    # Input names: prefer the tool spec's declared inputs; fall back to the
-    # recovered mapping from container volumes.
-    spec_inputs = spec.get("inputs") or {}
-    input_map = _input_name_to_filename(entry)
-    input_names = list(spec_inputs.keys()) or list(input_map.keys())
-    if not input_names:
-        input_decls = ["    path input"]
-    else:
-        input_decls = [f"    path {name}" for name in input_names]
-
-    # Output declarations: prefer concrete filenames from the recorded run;
-    # fall back to tool spec patterns.  Each output gets an emit: name so
-    # the workflow block can reference individual outputs by name.
-    output_files = _output_filenames(entry)
-    if output_files:
-        output_decls = [
-            f"    path '{f}', emit: out{idx}"
-            for idx, f in enumerate(output_files)
-        ]
-    else:
-        output_decls = []
-        for idx, out_def in enumerate((spec.get("outputs") or {}).values()):
-            pattern = out_def.get("pattern") or f"*.{out_def.get('format', 'out')}"
-            output_decls.append(f"    path '{pattern}', emit: out{idx}")
-        if not output_decls:
-            output_decls = ["    path '*', emit: out0"]
+    # Input/output declarations share logic with the engine variant —
+    # each output gets an emit: name so the workflow block can reference
+    # individual outputs by name.
+    input_decls, output_decls, input_names = _io_declarations(entry)
 
     script = _render_script_for_nextflow(entry, input_names)
 
