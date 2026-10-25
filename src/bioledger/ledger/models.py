@@ -143,7 +143,6 @@ class LedgerSession(BaseModel):
         """
         from bioledger.forges.analysisforge.crystallize import (
             _build_dependency_graph,
-            _build_output_source_map,
         )
 
         tool_entries = [
@@ -151,5 +150,4 @@ class LedgerSession(BaseModel):
             if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
             and e.run_status in ("completed", "failed", "running")
         ]
-        source_map = _build_output_source_map(tool_entries)
-        return _build_dependency_graph(tool_entries, source_map)
+        return _build_dependency_graph(tool_entries)

@@ -19,6 +19,7 @@ Provides:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -43,6 +44,72 @@ class _OutputRef(str):
         obj = super().__new__(cls, path)
         obj.path = path
         return obj
+
+
+class _NextflowVar(str):
+    """A ``${name}`` placeholder standing in for a Nextflow ``path`` input.
+
+    Renders exactly like a plain string, but is recognized by
+    :func:`nextflow_jinja_env`'s filters. A literal ``"${bam}"`` has no
+    file extension, so running the shared ``stem``/``basename`` filters on
+    it is a no-op — the correct output is the equivalent Nextflow ``Path``
+    property (``${bam.baseName}``, ``${bam.simpleName}``, ``${bam.name}``),
+    which Nextflow's GString resolves against the staged file.
+    """
+
+
+_NF_VAR_RE = re.compile(r"^\$\{(\w+)\}$")
+
+
+def nextflow_jinja_env():
+    """Jinja env where path filters map ``${var}`` onto Nextflow Path props.
+
+    Same filters as the shared toolspec env, but ``stem``/``basename``/
+    ``splitext`` detect :class:`_NextflowVar` placeholders and emit Groovy
+    expressions instead of processing the literal text:
+
+    - ``{{ inputs.x | stem }}``       → ``${x.baseName}``   (last ext only)
+    - ``{{ inputs.x | stem(true) }}`` → ``${x.simpleName}`` (all exts)
+    - ``{{ inputs.x | basename }}``   → ``${x.name}``
+    - ``{{ inputs.x | splitext }}``   → ``[${x.baseName}, ${x.extension}]``
+
+    Any other value flows through to the original filter unchanged.
+    """
+    from bioledger.toolspec import get_jinja_env
+
+    env = get_jinja_env().overlay()
+    env.filters = dict(env.filters)  # detach before overriding
+    base_stem = env.filters["stem"]
+    base_basename = env.filters["basename"]
+    base_splitext = env.filters["splitext"]
+
+    def _nf_prop(value: object, prop: str) -> _NextflowVar | None:
+        m = _NF_VAR_RE.match(str(value))
+        if isinstance(value, _NextflowVar) and m:
+            return _NextflowVar(f"${{{m.group(1)}.{prop}}}")
+        return None
+
+    def _stem(value: object, all: bool = False) -> object:  # noqa: A002
+        prop = "simpleName" if all else "baseName"
+        return _nf_prop(value, prop) or base_stem(str(value), all)
+
+    def _basename(value: object) -> object:
+        return _nf_prop(value, "name") or base_basename(str(value))
+
+    def _splitext(value: object) -> object:
+        m = _NF_VAR_RE.match(str(value))
+        if isinstance(value, _NextflowVar) and m:
+            name = m.group(1)
+            return [
+                _NextflowVar(f"${{{name}.baseName}}"),
+                _NextflowVar(f"${{{name}.extension}}"),
+            ]
+        return base_splitext(str(value))
+
+    env.filters["stem"] = _stem
+    env.filters["basename"] = _basename
+    env.filters["splitext"] = _splitext
+    return env
 
 
 def _build_render_context(

@@ -1236,7 +1236,7 @@ class AnalysisForgeAgent:
             )
             companion = {
                 n: str(fanout_dir / n)
-                for n in ("main.nf", "params.json")
+                for n in ("main.nf", "params.json", "nextflow.config")
                 if (fanout_dir / n).exists()
             }
         if engine_cmd:

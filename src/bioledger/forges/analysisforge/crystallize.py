@@ -6,68 +6,67 @@ from pathlib import Path
 from typing import Any
 
 from bioledger.ledger.models import EntryKind, LedgerEntry, LedgerSession
-from bioledger.toolspec import get_jinja_env
 
 logger = logging.getLogger(__name__)
 
 
-def _build_output_source_map(
-    entries: list[LedgerEntry],
-) -> dict[str, tuple[str, str]]:
-    """Build a map from output filename → (entry_id, emit_name).
+def _produced_outputs(entry: LedgerEntry) -> list[tuple[int, str]]:
+    """(emit_index, basename) pairs for an entry's genuine outputs.
 
-    If multiple entries produce the same filename, the first one in the
-    list wins (entries are typically in execution order).
-
-    Files that appear as both input and output in the same entry with the
-    SAME sha256 are excluded — they are staged inputs that leaked into the
-    output list (the tool didn't produce them, they were just staged there).
-
-    However, if the sha256 DIFFERS (e.g. bgzip re-compresses a .fna.gz to
-    a .fna.gz with different content), the output is legitimate and is
-    included so downstream tools can chain to it.
+    Files that appear as both input and output with the SAME sha256 are
+    excluded — they are staged inputs that leaked into the output list
+    (the tool didn't produce them, they were just staged there). If the
+    sha256 DIFFERS (e.g. bgzip re-compresses a .fna.gz to different
+    content), the output is legitimate and downstream tools chain to it.
+    Emit indices match ``_io_declarations``' ``out{idx}`` naming, which
+    enumerates the unfiltered recorded output list.
     """
-    source_map: dict[str, tuple[str, str]] = {}
-    for entry in entries:
-        # Map basename → sha256 for inputs, to detect staged-input leaks
-        input_sha: dict[str, str] = {}
-        for f in entry.files:
-            if f.role == "input":
-                input_sha[Path(f.path).name] = f.sha256
-        output_files = _output_filenames(entry)
-        for idx, filename in enumerate(output_files):
-            # Skip staged inputs that leaked into outputs: same basename
-            # AND same sha256 means the tool didn't produce it.
-            if filename in input_sha:
-                output_sha = next(
-                    (f.sha256 for f in entry.files
-                     if f.role == "output" and Path(f.path).name == filename),
-                    "",
-                )
-                if output_sha == input_sha[filename]:
-                    continue
-            if filename not in source_map:
-                source_map[filename] = (entry.id, f"out{idx}")
-    return source_map
+    input_sha: dict[str, str] = {}
+    for f in entry.files:
+        if f.role == "input":
+            input_sha[Path(f.path).name] = f.sha256
+    produced: list[tuple[int, str]] = []
+    for idx, filename in enumerate(_output_filenames(entry)):
+        if filename in input_sha:
+            output_sha = next(
+                (f.sha256 for f in entry.files
+                 if f.role == "output" and Path(f.path).name == filename),
+                "",
+            )
+            if output_sha == input_sha[filename]:
+                continue
+        produced.append((idx, filename))
+    return produced
+
+
+def _update_source_map(
+    source_map: dict[str, tuple[str, str]],
+    entry: LedgerEntry,
+) -> None:
+    """Record an entry's produced files; later producers overwrite."""
+    for idx, filename in _produced_outputs(entry):
+        source_map[filename] = (entry.id, f"out{idx}")
 
 
 def _build_dependency_graph(
     entries: list[LedgerEntry],
-    source_map: dict[str, tuple[str, str]],
 ) -> dict[str, set[str]]:
     """Build a dependency graph based on file-level input/output matching.
 
     Entry A depends on entry B if A consumes a file that B produces.
-    This replaces the single parent_id link with multi-source dependencies.
+    The source map is built incrementally so each input resolves against
+    the most recent producer *before* the consumer — an intermediate
+    step that rewrites a file under the same basename becomes the
+    dependency, not the original producer.
     """
     deps: dict[str, set[str]] = {e.id: set() for e in entries}
+    source_map: dict[str, tuple[str, str]] = {}
     for entry in entries:
-        input_map = _input_name_to_filename(entry)
-        for filename in input_map.values():
-            if filename in source_map:
-                producer_id, _ = source_map[filename]
-                if producer_id != entry.id:
-                    deps[entry.id].add(producer_id)
+        for filename in _input_name_to_filename(entry).values():
+            producer = source_map.get(filename)
+            if producer is not None and producer[0] != entry.id:
+                deps[entry.id].add(producer[0])
+        _update_source_map(source_map, entry)
     return deps
 
 
@@ -164,7 +163,11 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
     their original filename and are referenced as the bash variable ``${name}``.
     Output files in the work dir (``.``) are captured by the output declaration.
     """
-    from bioledger.core.engines._subprocess import _OutputRef
+    from bioledger.core.engines._subprocess import (
+        _NextflowVar,
+        _OutputRef,
+        nextflow_jinja_env,
+    )
 
     spec = entry.tool_spec_snapshot or {}
     template_str = spec.get("command")
@@ -189,13 +192,22 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
     outputs_ctx: dict[str, Any] = {"_dir": "."}
     for name, fname in _output_name_to_filename(entry).items():
         outputs_ctx[name] = _OutputRef(fname)
+    # Declared inputs become ${name} path vars; spec inputs that weren't
+    # mapped at run time (optional inputs the caller omitted) bind to ""
+    # so `{% if inputs.opt %}` and bare `{{ inputs.opt }}` match live
+    # execution instead of emitting an undeclared path variable.
+    inputs_ctx: dict[str, Any] = {
+        name: _NextflowVar(f"${{{name}}}") for name in input_names
+    }
+    for name in (spec.get("inputs") or {}):
+        inputs_ctx.setdefault(name, "")
     context = {
-        "inputs": {name: f"${{{name}}}" for name in input_names},
+        "inputs": inputs_ctx,
         "outputs": outputs_ctx,
         "parameters": params_dict,
     }
     try:
-        return get_jinja_env().from_string(template_str).render(context)
+        return nextflow_jinja_env().from_string(template_str).render(context)
     except Exception:
         logger.warning("Failed to render Nextflow script for %s", entry.id)
         if entry.container and entry.container.command:
@@ -203,20 +215,36 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
         return "echo 'render failed'"
 
 
+def _declared_input_names(entry: LedgerEntry) -> list[str]:
+    """Names of the Nextflow ``path`` inputs to declare for an entry.
+
+    Prefers the slots actually staged at run time (``input_mapping``),
+    ordered by spec declaration first so declarations and workflow-call
+    channels agree; extra staged slots not in the spec (e.g. expanded
+    collection slots ``reads__0``) follow. Falls back to spec names for
+    legacy entries with no recorded mapping.
+    """
+    spec_inputs = (entry.tool_spec_snapshot or {}).get("inputs") or {}
+    input_map = _input_name_to_filename(entry)
+    if not input_map:
+        return list(spec_inputs.keys())
+    names = [n for n in spec_inputs if n in input_map]
+    names += [n for n in input_map if n not in spec_inputs]
+    return names
+
+
 def _io_declarations(
     entry: LedgerEntry,
 ) -> tuple[list[str], list[str], list[str]]:
     """Build Nextflow input/output declaration lines for an entry.
 
-    Returns (input_decls, output_decls, input_names). Input names prefer
-    the spec's declared inputs and fall back to the recovered volume
-    mapping; outputs prefer recorded filenames and fall back to spec
-    patterns. Shared by docker/conda and engine process builders.
+    Returns (input_decls, output_decls, input_names). Input names are
+    the slots actually staged at run time (unmapped optional inputs are
+    not declared); outputs prefer recorded filenames and fall back to
+    spec patterns. Shared by docker/conda and engine process builders.
     """
     spec = entry.tool_spec_snapshot or {}
-    spec_inputs = spec.get("inputs") or {}
-    input_map = _input_name_to_filename(entry)
-    input_names = list(spec_inputs.keys()) or list(input_map.keys())
+    input_names = _declared_input_names(entry)
     if not input_names:
         input_decls = ["    path input"]
     else:
@@ -403,12 +431,16 @@ def generate_engine_env_yml(entries: list[LedgerEntry]) -> str | None:
         "  - conda-forge",
         "dependencies:",
     ]
+    # The conda package that provides each engine's CLI — "galaxy" entries
+    # run through planemo, and `galaxy=` is not a valid bioconda package.
+    package_name = {"galaxy": "planemo"}
     for engine, version in sorted(versions.items()):
         ver = _extract_version(engine, version)
+        pkg = package_name.get(engine, engine)
         if re.match(r"^\d+\.\d+", ver):
-            lines.append(f"  - {engine}={ver}")
+            lines.append(f"  - {pkg}={ver}")
         else:
-            lines.append(f"  # {engine}: version could not be determined")
+            lines.append(f"  # {pkg}: version could not be determined")
     return "\n".join(lines) + "\n"
 
 
@@ -423,7 +455,11 @@ def _render_workflow(ordered: list[LedgerEntry]) -> str:
     if not ordered:
         return "// Empty workflow — no tool or script runs in selection"
 
-    source_map = _build_output_source_map(ordered)
+    # The source map is built incrementally as entries are processed so a
+    # consumer always wires to the most recent PRIOR producer of a given
+    # filename — important when an intermediate step rewrites a file under
+    # the same basename (first-wins would wire the original producer).
+    source_map: dict[str, tuple[str, str]] = {}
     entry_to_proc: dict[str, str] = {}
     processes: list[str] = []
     workflow_lines: list[str] = ["workflow {"]
@@ -434,22 +470,18 @@ def _render_workflow(ordered: list[LedgerEntry]) -> str:
         processes.append(_make_nf_process(proc, entry))
 
         # Wire each input to its correct source
-        spec_inputs = (entry.tool_spec_snapshot or {}).get("inputs") or {}
         input_map = _input_name_to_filename(entry)
-        input_names = list(spec_inputs.keys()) or list(input_map.keys())
+        input_names = _declared_input_names(entry)
 
         channels: list[str] = []
         for name in input_names:
             filename = input_map.get(name)
-            if filename and filename in source_map:
-                producer_id, emit_name = source_map[filename]
-                # Skip self-references: an entry's input may share a basename
-                # with its own output (e.g. bgzip input and output are both
-                # .fna.gz). Wire to crate channel instead.
-                if producer_id != entry.id and producer_id in entry_to_proc:
-                    producer_proc = entry_to_proc[producer_id]
-                    channels.append(f"{producer_proc}.out.{emit_name}")
-                    continue
+            producer = source_map.get(filename) if filename else None
+            if producer is not None:
+                producer_id, emit_name = producer
+                producer_proc = entry_to_proc[producer_id]
+                channels.append(f"{producer_proc}.out.{emit_name}")
+                continue
             # Root input: wire to crate channel
             if filename:
                 crate_dir = entry.id[:8]
@@ -463,6 +495,7 @@ def _render_workflow(ordered: list[LedgerEntry]) -> str:
             channels.append("Channel.fromPath(params.input)")
 
         workflow_lines.append(f"    {proc}({', '.join(channels)})")
+        _update_source_map(source_map, entry)
 
     workflow_lines.append("}")
     return "\n".join(processes) + "\n\n" + "\n".join(workflow_lines)
@@ -488,8 +521,7 @@ def to_nextflow(
         if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
         and e.run_status in valid_statuses
     ]
-    source_map = _build_output_source_map(tool_entries)
-    deps = _build_dependency_graph(tool_entries, source_map)
+    deps = _build_dependency_graph(tool_entries)
     ordered = _topological_order_from_deps(tool_entries, deps)
     return _render_workflow(ordered)
 
@@ -517,7 +549,6 @@ def to_nextflow_from_entries(
         if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
         and e.run_status in valid_statuses
     ]
-    source_map = _build_output_source_map(tool_entries)
-    deps = _build_dependency_graph(tool_entries, source_map)
+    deps = _build_dependency_graph(tool_entries)
     ordered = _topological_order_from_deps(tool_entries, deps)
     return _render_workflow(ordered)
