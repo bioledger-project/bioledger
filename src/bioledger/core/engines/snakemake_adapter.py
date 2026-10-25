@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shlex
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from bioledger.core.engines.conda_derive import resolve_container_from_spec
 from bioledger.core.engines.config import SnakemakeEngineConfig
@@ -85,110 +88,141 @@ def _generate_snakefile(
     input_mapping: dict[str, str],
     container_image: str,
     artifact_path: Path,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Generate a parameterized Snakefile for fan-out.
+
+    Produces a *valid* Snakefile: top-level Python does sample discovery
+    with ``glob.glob`` (``glob`` is not a Snakemake builtin), ``rule all``
+    uses ``expand()`` over discovered samples, collection inputs use
+    ``lambda wildcards:`` lookups, and the ``shell:`` block gets the
+    command rendered into ``{input.*}`` / ``{output.*}`` / ``{params.*}``
+    placeholders — raw ``{{ jinja }}`` never reaches Snakemake.
 
     The Snakefile uses ``config`` (from config.yaml written at submit time)
     for all path values — no hardcoded paths in the generated file.
-    ``submit()`` binds actual values via config.yaml.
 
-    Returns the list of rule names (step_inventory).
+    Returns (rule_names, collection_inputs).
     """
+    from bioledger.toolspec import get_jinja_env
+
     spec_outputs = getattr(spec, "outputs", {}) or {}
+    spec_params = getattr(spec, "parameters", {}) or {}
     command_template = getattr(spec, "command", "echo hello")
     tool_name = getattr(spec, "name", "tool")
 
-    # Identify collection inputs (scatter axes) vs single-file inputs
     collection_inputs, single_inputs = split_collection_inputs(
         spec, input_mapping
     )
+    scatter = collection_inputs[0] if collection_inputs else None
+    wc = "sample"
 
-    # Determine the scatter wildcard from the first collection input
-    scatter_wildcard = "item"
-    if collection_inputs:
-        first = collection_inputs[0]
-        kind, pattern = _parse_collection_value(input_mapping[first])
-        if kind == "glob":
-            scatter_wildcard = "sample"
-
-    # Build expand() output patterns — parameterized via config
-    output_patterns: list[str] = []
+    # Output patterns — {sample} wildcard substituted for expand()
+    output_items: list[tuple[str, str]] = []
     for out_name, out_def in spec_outputs.items():
-        pattern = getattr(out_def, "pattern", "") or (
-            "{" + scatter_wildcard + "}." + out_name
-        )
-        # Replace * with {wildcard} for expand()
+        pattern = getattr(out_def, "pattern", "") or f"{{{wc}}}.{out_name}"
         if "*" in pattern:
-            pattern = pattern.replace("*", "{" + scatter_wildcard + "}")
+            pattern = pattern.replace("*", "{" + wc + "}")
         elif "{" not in pattern:
-            pattern = "{" + scatter_wildcard + "}" + pattern
-        output_patterns.append(pattern)
+            pattern = "{" + wc + "}" + pattern
+        safe_name = re.sub(r"\W", "_", out_name)
+        output_items.append((safe_name, pattern))
+    if not output_items:
+        output_items = [("out", "{" + wc + "}.out")]
 
-    if not output_patterns:
-        output_patterns = ["{item}.out"]
-
-    # Build input declarations for the rule — all paths via config
-    input_lines: list[str] = []
-    for name in collection_inputs:
-        input_lines.append(
-            f'    {name}=expand('
-            f'"input/{{{scatter_wildcard}}}", '
-            f'{scatter_wildcard}=glob(config["{name}_pattern"])),'
+    # Render the Jinja command template into Snakemake placeholders.
+    # Filters like | stem on the scatter input map onto the wildcard —
+    # the wildcard IS the stem of each matched file.
+    if scatter:
+        command_template = re.sub(
+            r"\{\{\s*inputs\." + re.escape(scatter)
+            + r"\s*\|\s*(?:stem|basename|splitext)[^}]*\}\}",
+            "{wildcards." + wc + "}",
+            command_template,
         )
-    for name in single_inputs:
-        if name in input_mapping:
-            input_lines.append(f'    {name}=config["{name}"],')
+    inputs_ctx = {
+        n: "{input.%s}" % n for n in collection_inputs + single_inputs
+    }
+    outputs_ctx: dict[str, Any] = {"_dir": "."}
+    outputs_ctx.update({n: "{output.%s}" % n for n, _ in output_items})
+    params_ctx = {n: "{params.%s}" % n for n in spec_params}
+    rendered_cmd = get_jinja_env().from_string(command_template).render(
+        {"inputs": inputs_ctx, "outputs": outputs_ctx,
+         "parameters": params_ctx}
+    )
 
-    # Build the Snakefile content
-    container_directive = ""
-    if container_image:
-        container_directive = f'    container: "{container_image}"'
+    rule_name = re.sub(r"\W", "_", tool_name)
 
-    # Parameterize with config values that submit() will bind
-    params_lines: list[str] = []
-    for name in single_inputs:
-        params_lines.append(f'    {name}=config["{name}"],')
-
-    rule_name = tool_name.replace("-", "_")
-
-    lines = [
+    lines: list[str] = [
         "# Generated by BioLedger — fan-out for " + tool_name,
-        "# Scatter axis: " + scatter_wildcard
+        "# Scatter axis: " + wc
         + " (from collection input(s): "
         + ", ".join(collection_inputs) + ")",
         "",
+        "import glob as _glob",
+        "import os as _os",
+        "",
         "configfile: 'config.yaml'",
         "",
-        "rule all:",
-        "    input:",
-        '        expand("' + output_patterns[0] + '", '
-        + scatter_wildcard + '=glob(config["'
-        + collection_inputs[0] + '_pattern"])),' if collection_inputs
-        else '        "' + output_patterns[0] + '",',
-        "",
-        "rule " + rule_name + ":",
-        "    input:",
     ]
-    lines.extend(input_lines if input_lines else ['    "",'])
-    lines.extend([
-        '    output:',
-    ])
-    for i, pat in enumerate(output_patterns):
-        comma = "," if i < len(output_patterns) - 1 else ""
-        lines.append(f'        "{pat}"{comma}')
-    lines.extend([
-        '    params:',
-    ])
-    lines.extend(params_lines if params_lines else ['    "",'])
-    if container_directive:
-        lines.append(container_directive)
-    lines.extend([
-        '    shell:',
+    if scatter:
+        lines += [
+            f'_MATCHED = sorted(_glob.glob(config["{scatter}_pattern"]))',
+            "_SAMPLES = [_os.path.splitext(_os.path.basename(p))[0] "
+            "for p in _MATCHED]",
+            "_INPUT_MAP = dict(zip(_SAMPLES, _MATCHED))",
+            "",
+        ]
+
+    lines += ["rule all:", "    input:"]
+    if scatter:
+        pats = ", ".join(f'"{p}"' for _, p in output_items)
+        lines.append(f"        expand([{pats}], {wc}=_SAMPLES),")
+    else:
+        for _, pat in output_items:
+            lines.append(f'        "{pat}",')
+
+    lines += ["", "rule " + rule_name + ":", "    input:"]
+    input_lines: list[str] = []
+    for name in collection_inputs:
+        if name == scatter:
+            input_lines.append(
+                f"        {name}=lambda wildcards: "
+                f"_INPUT_MAP[wildcards.{wc}],"
+            )
+        else:
+            # Secondary collection inputs pair files per-sample by
+            # substituting the wildcard into their glob pattern.
+            input_lines.append(
+                f"        {name}=lambda wildcards: "
+                f'_glob.glob(config["{name}_pattern"]'
+                f".replace(\"*\", wildcards.{wc}))[0],"
+            )
+    for name in single_inputs:
+        if name in input_mapping:
+            input_lines.append(f'        {name}=config["{name}"],')
+    lines.extend(input_lines if input_lines else ['        "",'])
+
+    lines.append("    output:")
+    for i, (name, pat) in enumerate(output_items):
+        comma = "," if i < len(output_items) - 1 else ""
+        lines.append(f'        {name}="{pat}"{comma}')
+
+    if spec_params:
+        lines.append("    params:")
+        for i, name in enumerate(spec_params):
+            comma = "," if i < len(spec_params) - 1 else ""
+            lines.append(f'        {name}=config["{name}"]{comma}')
+
+    if container_image:
+        lines.append(f'    container: "{container_image}"')
+
+    lines += [
+        "    shell:",
         '        """',
-        '        ' + command_template,
+        "        " + rendered_cmd,
         '        """',
         "",
-    ])
+    ]
 
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_path.write_text("\n".join(lines))
@@ -233,12 +267,10 @@ class SnakemakeAdapter:
         Single inputs get a ``<name>`` key with the path.
         """
         coll = set(collection_inputs or [])
-        lines: list[str] = []
+        data: dict[str, Any] = {}
         for k, v in {**input_mapping, **params}.items():
-            key = f"{k}_pattern" if k in coll else k
-            v_str = str(v).replace('"', '\\"')
-            lines.append(f'{key}: "{v_str}"')
-        return "\n".join(lines) + "\n"
+            data[f"{k}_pattern" if k in coll else k] = v
+        return yaml.safe_dump(data, sort_keys=False)
 
     def submit_spec(
         self,

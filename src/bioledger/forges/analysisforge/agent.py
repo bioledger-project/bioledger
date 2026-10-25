@@ -1111,12 +1111,66 @@ class AnalysisForgeAgent:
         self.session.add(entry)
 
         # Submit the workflow
-        run_handle = adapter.submit(
-            handle=handle,
-            input_mapping=input_mapping,
-            params=params,
-            work_dir=session_dir / f"fanout_{entry.id}",
-        )
+        fanout_dir = session_dir / f"fanout_{entry.id}"
+        try:
+            run_handle = adapter.submit(
+                handle=handle,
+                input_mapping=input_mapping,
+                params=params,
+                work_dir=fanout_dir,
+            )
+        except Exception:
+            # No phantom "running" entries when the launch itself fails.
+            entry.run_status = "failed"
+            entry.exit_code = 1
+            entry.notes = (
+                (entry.notes + "\n" if entry.notes else "")
+                + "Engine submit failed"
+            )
+            self.store.save_session(self.session)
+            raise
+
+        # Record the generated workflow artifacts as companion files and set
+        # the snapshot command to the truthful engine CLI invocation — the
+        # snapshot previously held the inner tool command (e.g. "samtools
+        # sort"), which crystallize would emit bare on the host without a
+        # container directive.
+        companion: dict[str, str] = {}
+        engine_cmd = ""
+        if resolved_engine == "snakemake":
+            jobs = engines_cfg.snakemake.jobs if engines_cfg else 1
+            runtime = (
+                engines_cfg.snakemake.container_runtime
+                if engines_cfg else "apptainer"
+            )
+            engine_cmd = (
+                f"snakemake -s ${{projectDir}}/{entry.id}/Snakefile "
+                f"--configfile ${{projectDir}}/{entry.id}/config.yaml "
+                f"--cores {jobs}"
+            )
+            if runtime != "none":
+                engine_cmd += f" --use-{runtime}"
+            companion = {
+                n: str(fanout_dir / n)
+                for n in ("Snakefile", "config.yaml")
+                if (fanout_dir / n).exists()
+            }
+        elif resolved_engine == "nextflow":
+            engine_cmd = (
+                f"nextflow run ${{projectDir}}/{entry.id}/main.nf "
+                f"-params-file ${{projectDir}}/{entry.id}/params.json "
+                f"-work-dir ${{projectDir}}/{entry.id}/work"
+            )
+            companion = {
+                n: str(fanout_dir / n)
+                for n in ("main.nf", "params.json")
+                if (fanout_dir / n).exists()
+            }
+        if engine_cmd:
+            entry.companion_files = companion
+            snapshot = dict(entry.tool_spec_snapshot or {})
+            snapshot["command"] = engine_cmd
+            entry.tool_spec_snapshot = snapshot
 
         # Write engine metadata sidecar for poll/collect reconstruction
         _write_engine_metadata_sidecar(
@@ -1158,6 +1212,7 @@ class AnalysisForgeAgent:
 
         companion_files: dict[str, str] = {}
         discovered_revision = ""
+        engines_cfg = self.config.engines if self.config else None
 
         # Parse the source string — supports @<revision> pinning syntax
         # e.g. "nfcore:align/bowtie2@abc123" or "toolshed:devteam/bowtie2@abc123"
@@ -1180,6 +1235,7 @@ class AnalysisForgeAgent:
             owner, repo_name = repo.split("/", 1)
             from bioledger.core.engines.toolshed_search import (
                 download_tool,
+                find_main_tool_xml,
                 parse_tool_to_spec,
             )
 
@@ -1192,20 +1248,26 @@ class AnalysisForgeAgent:
             discovered_revision = resolved_rev
             spec = parse_tool_to_spec(tool_dir)
             engine = "galaxy"
+            tool_xml = find_main_tool_xml(tool_dir)
 
-            # Set truthful command: planemo run with heredoc job.yml
-            input_names = list(spec.inputs.keys())
+            # Set truthful command: planemo run with heredoc job.yml.
+            # Only inputs actually provided land in job.yml — optional
+            # inputs the caller omitted must not render as empty entries.
             job_yml_lines = ["cat > job.yml <<'EOF'"]
-            for name in input_names:
+            for name in spec.inputs:
+                if name not in input_mapping:
+                    continue
                 job_yml_lines.append(f"{name}:")
                 job_yml_lines.append("  class: File")
                 job_yml_lines.append(f"  path: {{{{ inputs.{name} }}}}")
+            for name in params:
+                job_yml_lines.append(f"{name}: {{{{ parameters.{name} }}}}")
             job_yml_lines.append("EOF")
             job_yml_heredoc = "\n".join(job_yml_lines)
             # Use __ENTRY_ID__ placeholder — replaced after entry creation
             spec.command = (
                 f"{job_yml_heredoc}\n"
-                "planemo run ${projectDir}/__ENTRY_ID__/tool.xml "
+                f"planemo run ${{projectDir}}/__ENTRY_ID__/{tool_xml.name} "
                 "job.yml --outdir {{ outputs._dir }}"
             )
 
@@ -1320,26 +1382,44 @@ class AnalysisForgeAgent:
             snakefile_path.write_text(snakefile_content)
             companion_files["Snakefile"] = str(snakefile_path)
 
-            # Set command: snakemake runs the generated Snakefile
-            # Inputs and params are passed via --config so the Snakefile
-            # can reference them as config['name'] / config.get('name')
-            # Snakemake's --config takes nargs='*' (all pairs after one flag);
+            # Set command: snakemake runs the generated Snakefile.
+            # Only provided values land in --config — emitting an empty
+            # override for an unprovided optional would clobber the
+            # Snakefile's own default via config.get(). Snakemake's
+            # --config takes nargs='*' (all pairs after one flag);
             # multiple --config flags would silently discard earlier ones.
             config_args = []
             for name in spec.inputs:
-                config_args.append(
-                    f"{name}={{{{ inputs.{name} }}}}"
-                )
+                if name in input_mapping:
+                    config_args.append(
+                        f"{name}={{{{ inputs.{name} }}}}"
+                    )
             for name in spec.parameters:
-                config_args.append(
-                    f"{name}={{{{ parameters.{name} }}}}"
-                )
+                if name in params:
+                    config_args.append(
+                        f"{name}={{{{ parameters.{name} }}}}"
+                    )
             config_str = (
                 f"--config {' '.join(config_args)}"
                 if config_args else ""
             )
+            # Snakemake >=7 requires --cores/--jobs. Wrappers need conda
+            # for their environment.yaml; containerized wrappers
+            # additionally need the configured apptainer/singularity
+            # runtime — emit both flags unless runtime is "none".
+            snakemake_cfg = engines_cfg.snakemake if engines_cfg else None
+            cores = snakemake_cfg.jobs if snakemake_cfg else 2
+            runtime = (
+                snakemake_cfg.container_runtime if snakemake_cfg else "conda"
+            )
+            runtime_flag = (
+                "" if runtime == "none"
+                else "--use-conda "
+                + ("" if runtime == "conda" else f"--use-{runtime} ")
+            )
             spec.command = (
                 f"snakemake -s ${{projectDir}}/__ENTRY_ID__/Snakefile "
+                f"--cores {cores} {runtime_flag}"
                 f"{config_str} --directory {{{{ outputs._dir }}}}"
             )
 
@@ -1353,7 +1433,6 @@ class AnalysisForgeAgent:
             )
 
         # Get the engine adapter
-        engines_cfg = self.config.engines if self.config else None
         adapter = _get_engine_adapter(engine, engines_cfg)
 
         # Create LedgerEntry
@@ -1381,18 +1460,32 @@ class AnalysisForgeAgent:
         # Now that we have entry.id, fix the command placeholder
         if engine == "galaxy":
             spec.command = spec.command.replace("__ENTRY_ID__", entry.id)
+            # Persist the resolved command — without this the snapshot
+            # keeps __ENTRY_ID__ and crystallized workflows get a dead path.
+            entry.tool_spec_snapshot = spec.model_dump()
         elif engine == "nextflow":
-            # Set the command with the real entry.id
-            input_args = " ".join(
-                f"--{name} {{{{ inputs.{name} }}}}" for name in spec.inputs
+            # Set the command with the real entry.id. Only provided
+            # inputs/params become --flags; file paths are shell-quoted at
+            # render time via | shquote.
+            flag_args = " ".join(
+                f"--{name} {{{{ inputs.{name} | shquote }}}}"
+                for name in spec.inputs
+                if name in input_mapping
             )
+            param_args = " ".join(
+                f"--{name} {{{{ parameters.{name} }}}}"
+                for name in spec.parameters
+                if name in params
+            )
+            if param_args:
+                flag_args = f"{flag_args} {param_args}".strip()
             config_flag = (
                 f"-c ${{projectDir}}/{entry.id}/nextflow.config "
                 if "nextflow.config" in companion_files else ""
             )
             spec.command = (
                 f"nextflow run ${{projectDir}}/{entry.id}/wrapper_main.nf "
-                f"{config_flag}{input_args} --outdir {{{{ outputs._dir }}}}"
+                f"{config_flag}{flag_args} --outdir {{{{ outputs._dir }}}}"
             )
             # Update the snapshot with the real command
             entry.tool_spec_snapshot = spec.model_dump()
@@ -1405,14 +1498,32 @@ class AnalysisForgeAgent:
             spec.command = spec.command.replace("__ENTRY_ID__", entry.id)
             entry.tool_spec_snapshot = spec.model_dump()
 
-        # Submit via submit_spec() — no more tool_dir/module_dir kwargs
-        submit_kwargs: dict[str, Any] = {
-            "spec": spec,
-            "input_mapping": input_mapping,
-            "params": params,
-            "work_dir": work_dir / f"run_{entry.id}",
-        }
-        run_handle = adapter.submit_spec(**submit_kwargs)
+        # Stage companion files (module tree, tool XML, generated Snakefile)
+        # into run_<id>/<entry.id>/ so ${projectDir}/<entry.id>/... resolves.
+        from bioledger.forges.analysisforge.executor import (
+            stage_companion_files,
+        )
+
+        run_dir = work_dir / f"run_{entry.id}"
+        stage_companion_files(companion_files, run_dir, entry.id)
+
+        try:
+            run_handle = adapter.submit_spec(
+                spec=spec,
+                input_mapping=input_mapping,
+                params=params,
+                work_dir=run_dir,
+            )
+        except Exception:
+            # No phantom "running" entries when the launch itself fails.
+            entry.run_status = "failed"
+            entry.exit_code = 1
+            entry.notes = (
+                (entry.notes + "\n" if entry.notes else "")
+                + "Engine submit failed"
+            )
+            self.store.save_session(self.session)
+            raise
 
         # Write engine metadata sidecar for poll/collect reconstruction
         _write_engine_metadata_sidecar(

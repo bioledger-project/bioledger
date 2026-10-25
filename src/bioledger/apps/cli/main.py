@@ -736,7 +736,12 @@ async def _analysis_chat(session_id: str) -> None:
                                 response += "\n" + "\n".join(output_snippets)
                             console.print(f"\n[blue]assistant>[/blue] {response}")
                         else:
-                            snippet = _failure_snippet(run_result, Path(entry.files[0].path).parent)
+                            run_dir_guess = (
+                                Path(entry.files[0].path).parent
+                                if entry.files
+                                else session_dir / "runs" / entry.id
+                            )
+                            snippet = _failure_snippet(run_result, run_dir_guess)
                             fail_msg = (
                                 f"{tool_request.tool_name} failed "
                                 f"(exit {run_result.exit_code}):\n{snippet}"

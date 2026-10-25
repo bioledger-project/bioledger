@@ -25,6 +25,23 @@ TOOLSHED_URL = "https://toolshed.g2.bx.psu.edu"
 _CACHE_DIR = Path.home() / ".bioledger" / "cache" / "toolshed"
 
 
+def find_main_tool_xml(tool_dir: Path) -> Path:
+    """Return the first ``*.xml`` under ``tool_dir`` whose root element is ``<tool>``.
+
+    Tool Shed repositories ship tool XMLs under their real names
+    (``bowtie2.xml``), plus non-tool XML files (``macros.xml``, datatype
+    configs). Raises ``FileNotFoundError`` if none is found.
+    """
+    for xml in sorted(Path(tool_dir).rglob("*.xml")):
+        try:
+            root = ET.parse(xml).getroot()
+        except ET.ParseError:
+            continue
+        if root.tag == "tool":
+            return xml
+    raise FileNotFoundError(f"No Galaxy <tool> XML found under {tool_dir}")
+
+
 @dataclass
 class ToolShedResult:
     """A single Tool Shed search hit."""

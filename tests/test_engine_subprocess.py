@@ -349,6 +349,92 @@ class TestFinalizeEngineEntry:
         )
 
 
+class TestFanoutGenerators:
+    """Generated fan-out workflows must be syntactically valid and free
+    of raw Jinja — they are written to disk and run by real engines."""
+
+    class _I:
+        def __init__(self, collection=False):
+            self.collection = collection
+
+    class _O:
+        def __init__(self, pattern):
+            self.pattern = pattern
+
+    class _Spec:
+        name = "samtools-sort"
+        command = "samtools sort -o {{ outputs.sorted }} {{ inputs.bam }}"
+        inputs = {"bam": None}  # set per test
+        outputs = {"sorted": None}
+        parameters = {}
+
+    def _spec(self):
+        spec = self._Spec()
+        spec.inputs = {"bam": self._I(collection=True)}
+        spec.outputs = {"sorted": self._O("{sample}.sorted.bam")}
+        return spec
+
+    def test_snakefile_no_raw_jinja_or_bare_glob(self, tmp_path):
+        from bioledger.core.engines.snakemake_adapter import _generate_snakefile
+
+        rules, coll = _generate_snakefile(
+            self._spec(), {"bam": "data/*.bam"}, "img:1",
+            tmp_path / "Snakefile",
+        )
+        sf = (tmp_path / "Snakefile").read_text()
+        assert "{{" not in sf
+        # glob() is not a Snakemake builtin — must be glob.glob/_glob.glob
+        assert "glob(" not in sf.replace("_glob.glob(", "")
+        assert "lambda wildcards" in sf
+        assert "expand(" in sf
+        assert "{input.bam}" in sf
+        assert "{output.sorted}" in sf
+        assert rules == ["samtools_sort"]
+        assert coll == ["bam"]
+
+    def test_snakefile_stem_filter_maps_to_wildcard(self, tmp_path):
+        from bioledger.core.engines.snakemake_adapter import _generate_snakefile
+
+        spec = self._spec()
+        spec.command = "samtools sort -o {{ outputs.sorted }} {{ inputs.bam }} && index {{ inputs.bam | stem }}.bai"
+        _generate_snakefile(
+            spec, {"bam": "data/*.bam"}, "img:1", tmp_path / "Snakefile"
+        )
+        sf = (tmp_path / "Snakefile").read_text()
+        assert "{wildcards.sample}" in sf
+        assert "{{" not in sf
+
+    def test_nextflow_workflow_no_raw_jinja_or_undefined_refs(self, tmp_path):
+        from bioledger.core.engines.nextflow_adapter import (
+            _generate_nextflow_workflow,
+        )
+
+        spec = self._Spec()
+        spec.inputs = {"bam": self._I(collection=True)}
+        spec.outputs = {"sorted": self._O("*.sorted.bam")}
+        spec.command = "samtools sort -o {{ outputs.sorted.path }} {{ inputs.bam }}"
+        _generate_nextflow_workflow(
+            spec, {"bam": "data/*.bam"}, "img:1", tmp_path / "main.nf"
+        )
+        nf = (tmp_path / "main.nf").read_text()
+        assert "{{" not in nf
+        # ${sorted} was the old broken mapping — outputs must resolve to
+        # a concrete filename the tool writes
+        assert "${sorted}" not in nf
+        assert "${bam.simpleName}.sorted.bam" in nf
+        assert "${bam}" in nf
+
+    def test_nextflow_proc_name_sanitized(self, tmp_path):
+        from bioledger.core.engines.nextflow_adapter import (
+            _generate_nextflow_workflow,
+        )
+
+        procs, _ = _generate_nextflow_workflow(
+            self._spec(), {"bam": "data/*.bam"}, "img:1", tmp_path / "main.nf"
+        )
+        assert procs == ["samtools_sort"]
+
+
 class TestShquoteFilter:
     def test_shquote_registered_in_shared_env(self):
         from bioledger.toolspec import get_jinja_env

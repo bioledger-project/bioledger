@@ -194,6 +194,32 @@ def _stage_inputs(
     return {slot: staged_names[slot] for slot in input_files}
 
 
+def stage_companion_files(
+    companion_files: dict[str, str],
+    dest_root: Path,
+    entry_id: str,
+) -> Path:
+    """Copy companion files into ``dest_root/<entry_id>/<dest_rel>``.
+
+    Discovered-tool companion files (module trees, tool XML, generated
+    Snakefiles) are recorded as ``{dest_rel: src_path}`` on the LedgerEntry.
+    Engine commands reference them as ``${projectDir}/<entry_id>/<dest_rel>``,
+    so they must be staged into the run directory before launch.
+
+    ``dest_rel`` must be a relative path — ``..`` and absolute paths raise
+    ``ValueError``. Returns the created ``<entry_id>`` directory.
+    """
+    dest_dir = Path(dest_root) / entry_id
+    for dest_rel, src in companion_files.items():
+        rel = Path(dest_rel)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise ValueError(f"Invalid companion file destination: {dest_rel!r}")
+        target = dest_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
+    return dest_dir
+
+
 def _is_under_excluded_dir(resolved_path: str, exclude_dirs: set) -> bool:
     """True if a resolved path is inside any excluded directory."""
     return any(
