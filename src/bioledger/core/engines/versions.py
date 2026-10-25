@@ -64,8 +64,10 @@ def detect_engine_version(engine_name: str, executable: str | None = None) -> st
             full_cmd, capture_output=True, text=True, timeout=10,
         )
         output = (result.stdout or result.stderr).strip()
-        first_line = output.split("\n")[0] if output else ""
-        ver = _extract_version(engine_name, first_line)
+        # Scan the full output, not just the first line — `nextflow
+        # -version` prints a multi-line banner ("N E X T F L O W" logo)
+        # whose first line contains no version.
+        ver = _extract_version(engine_name, output)
         return f"{engine_name} {ver}"
     except Exception:
         return f"{engine_name} unknown"

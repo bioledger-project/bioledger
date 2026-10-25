@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .models import ChatMessage, LedgerEntry, LedgerSession
 
-SCHEMA_VERSION = 2  # bump when schema changes
+SCHEMA_VERSION = 3  # bump when schema changes
 
 _SCHEMA_V1 = """\
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -40,14 +40,22 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON chat_messages(session_id);
--- Unique names: multiple unnamed sessions allowed, named must be unique
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name) WHERE name != '';
+-- Unique names: multiple unnamed sessions allowed, named must be unique;
+-- archived sessions release their name for reuse
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)
+    WHERE name != '' AND status != 'archived';
 """
 
 # Sequential migrations: version N → N+1
 _MIGRATIONS: dict[int, str] = {
     # 2: Enforce unique session names (unnamed sessions still allowed)
     2: "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name) WHERE name != '';",
+    # 3: Archived sessions release their name for reuse
+    3: (
+        "DROP INDEX IF EXISTS idx_sessions_name;"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name) "
+        "WHERE name != '' AND status != 'archived';"
+    ),
 }
 
 
@@ -90,6 +98,13 @@ class LedgerStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")  # WAL for concurrent reads
+        # Enforce the REFERENCES clauses — without this pragma SQLite
+        # parses foreign keys but never checks them.
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        # Wait up to 5s on SQLITE_BUSY instead of failing immediately —
+        # short-lived second processes (e.g. `bioledger status`) racing a
+        # writer would otherwise see spurious "database is locked".
+        self._conn.execute("PRAGMA busy_timeout=5000")
         _run_migrations(self._conn)
 
     def create_session(self, session: LedgerSession) -> None:
@@ -237,7 +252,18 @@ class LedgerStore:
                 "SELECT data FROM entries WHERE session_id = ? ORDER BY timestamp"
             )
             entry_rows = self._conn.execute(entry_query, (session_id,)).fetchall()
-        session.entries = [LedgerEntry.model_validate_json(r[0]) for r in entry_rows]
+        entries: list[LedgerEntry] = []
+        for r in entry_rows:
+            try:
+                entries.append(LedgerEntry.model_validate_json(r[0]))
+            except Exception:
+                # Quarantine a corrupt row rather than failing the whole
+                # session load — the remaining entries are still usable.
+                import logging
+                logging.warning(
+                    "Skipping corrupt entry row in session %s", session_id,
+                )
+        session.entries = entries
 
         if include_messages:
             if max_messages is not None:
@@ -333,6 +359,16 @@ class LedgerStore:
     def save_session(self, session: LedgerSession) -> None:
         """Persist a session's current state: upsert session row, append any new
         entries and chat messages not yet in the DB. Safe to call repeatedly."""
+        try:
+            self._save_session_txn(session)
+        except Exception:
+            # A mid-loop failure must not leave a half-written session —
+            # roll back the open transaction (sqlite3 autocommits nothing
+            # until commit(), but the connection stays dirty otherwise).
+            self._conn.rollback()
+            raise
+
+    def _save_session_txn(self, session: LedgerSession) -> None:
         # Upsert session metadata
         self._conn.execute(
             "INSERT INTO sessions (id, name, description, status, created, updated) "

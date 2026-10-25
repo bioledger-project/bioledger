@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 from bioledger.ledger.models import EntryKind, LedgerEntry, LedgerSession
 from bioledger.toolspec import get_jinja_env
@@ -137,7 +139,7 @@ def _proc_name(entry: LedgerEntry, index: int) -> str:
     base = entry.tool_spec_name or (
         entry.container.image.split("/")[-1].split(":")[0] if entry.container else "unknown"
     )
-    return f"step_{index}_{base}".replace("-", "_")
+    return re.sub(r"[^A-Za-z0-9_]", "_", f"step_{index}_{base}")
 
 
 def _input_name_to_filename(entry: LedgerEntry) -> dict[str, str]:
@@ -163,6 +165,34 @@ def _output_filenames(entry: LedgerEntry) -> list[str]:
     return [Path(f.path).name for f in entry.files if f.role == "output"]
 
 
+def _output_name_to_filename(entry: LedgerEntry) -> dict[str, str]:
+    """Map spec output name -> concrete filename for script rendering.
+
+    The process ``output:`` block declares ``path '<file>', emit: <name>``;
+    a template that writes ``{{ outputs.<name>.path }}`` must produce that
+    same filename. Literal patterns are used directly; glob patterns are
+    resolved against the recorded run's actual output filenames.
+    """
+    import fnmatch
+
+    spec = entry.tool_spec_snapshot or {}
+    recorded = _output_filenames(entry)
+    result: dict[str, str] = {}
+    for name, odef in (spec.get("outputs") or {}).items():
+        pattern = (
+            odef.get("pattern", "")
+            if isinstance(odef, dict) else getattr(odef, "pattern", "")
+        ) or ""
+        if pattern and "*" not in pattern:
+            result[name] = pattern
+        else:
+            result[name] = next(
+                (f for f in recorded if fnmatch.fnmatch(f, pattern or "*")),
+                name,
+            )
+    return result
+
+
 def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> str:
     """Re-render the tool spec command template with Nextflow-style variables.
 
@@ -170,6 +200,8 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
     their original filename and are referenced as the bash variable ``${name}``.
     Output files in the work dir (``.``) are captured by the output declaration.
     """
+    from bioledger.core.engines._subprocess import _OutputRef
+
     spec = entry.tool_spec_snapshot or {}
     template_str = spec.get("command")
     if not template_str:
@@ -187,9 +219,15 @@ def _render_script_for_nextflow(entry: LedgerEntry, input_names: list[str]) -> s
     # Overlay entry.params (runtime overrides) on top of spec defaults
     if entry.params:
         params_dict = {**params_dict, **entry.params}
+    # outputs.<name>/.path -> the filename declared in the output: block —
+    # without this, `{{ outputs.x.path }}` silently renders "" and `-o `
+    # swallows the next argument.
+    outputs_ctx: dict[str, Any] = {"_dir": "."}
+    for name, fname in _output_name_to_filename(entry).items():
+        outputs_ctx[name] = _OutputRef(fname)
     context = {
         "inputs": {name: f"${{{name}}}" for name in input_names},
-        "outputs": {"_dir": "."},
+        "outputs": outputs_ctx,
         "parameters": params_dict,
     }
     try:
@@ -344,37 +382,27 @@ def _detect_engine_versions(entries: list[LedgerEntry]) -> dict[str, str]:
     """Detect installed engine versions for entries that use them.
 
     Returns a dict mapping engine name to version string (or 'not installed').
-    Detection is best-effort — if an engine binary isn't found, emits a
-    placeholder string rather than failing.
+    Delegates to the shared ``versions.detect_engine_version`` which scans
+    all output lines for a semver (e.g. ``nextflow -version`` prints an
+    ASCII banner before the version line).
     """
-    import shutil
-    import subprocess
+    from bioledger.core.engines.versions import detect_engine_version
 
     engines_needed: set[str] = set()
     for entry in entries:
         if entry.executor in ("snakemake", "galaxy", "nextflow"):
             engines_needed.add(entry.executor)
 
-    versions: dict[str, str] = {}
     version_cmds = {
-        "snakemake": ["snakemake", "--version"],
-        "nextflow": ["nextflow", "-version"],
-        "galaxy": ["planemo", "--version"],
+        "snakemake": "snakemake",
+        "nextflow": "nextflow",
+        "galaxy": "planemo",
     }
-    for engine in engines_needed:
-        cmd = version_cmds.get(engine)
-        if not cmd or shutil.which(cmd[0]) is None:
-            versions[engine] = "not installed (version unknown)"
-            continue
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=10,
-            )
-            output = (result.stdout or result.stderr).strip()
-            versions[engine] = output.split("\n")[0] if output else "unknown"
-        except Exception:
-            versions[engine] = "not installed (version unknown)"
-    return versions
+    return {
+        engine: detect_engine_version(engine, version_cmds[engine])
+        for engine in engines_needed
+        if engine in version_cmds
+    }
 
 
 # Re-export from the shared versions module for backwards compatibility.
@@ -424,11 +452,11 @@ def generate_engine_env_yml(entries: list[LedgerEntry]) -> str | None:
         "dependencies:",
     ]
     for engine, version in sorted(versions.items()):
-        if version.startswith("not installed"):
-            lines.append(f"  # {engine}: {version}")
-        else:
-            ver = _extract_version(engine, version)
+        ver = _extract_version(engine, version)
+        if re.match(r"^\d+\.\d+", ver):
             lines.append(f"  - {engine}={ver}")
+        else:
+            lines.append(f"  # {engine}: version could not be determined")
     return "\n".join(lines) + "\n"
 
 

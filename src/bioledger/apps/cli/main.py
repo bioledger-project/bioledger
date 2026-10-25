@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 from pathlib import Path
 from typing import Any
 
@@ -86,11 +87,49 @@ def session_list(
     console.print(table)
 
 
+def _resolve_session(
+    store: LedgerStore,
+    ref: str,
+    include_messages: bool = True,
+) -> LedgerSession:
+    """Resolve a session by ID, then name, then unique ID prefix.
+
+    Prints a clean error and exits(1) when nothing matches, instead of
+    letting a raw KeyError/None bubble up to the user.
+    """
+    try:
+        return store.load_session(ref, include_messages=include_messages)
+    except KeyError:
+        pass
+    try:
+        return store.load_session_by_name(ref)
+    except KeyError:
+        pass
+    # Unique ID-prefix fallback (like git short SHAs)
+    if len(ref) >= 4:
+        matches = [
+            r for r in store.list_sessions()
+            if r["id"].startswith(ref)
+        ]
+        if len(matches) == 1:
+            return store.load_session(
+                matches[0]["id"], include_messages=include_messages
+            )
+        if len(matches) > 1:
+            console.print(
+                f"[red]Session prefix '{ref}' is ambiguous "
+                f"({len(matches)} matches)[/red]"
+            )
+            raise typer.Exit(1)
+    console.print(f"[red]Session '{ref}' not found by ID, name, or prefix[/red]")
+    raise typer.Exit(1)
+
+
 @session_app.command("show")
-def session_show(session_id: str) -> None:
+def session_show(session_ref: str) -> None:
     """Show session details, entries, and recent chat."""
     store = LedgerStore()
-    s = store.load_session(session_id)
+    s = _resolve_session(store, session_ref)
     console.print(f"[bold]Session {s.id}[/bold]  {s.name or '(unnamed)'}")
     console.print(
         f"  Status: {s.status.value}  |  "
@@ -114,31 +153,34 @@ def session_show(session_id: str) -> None:
 
 
 @session_app.command("rename")
-def session_rename(session_id: str, name: str) -> None:
+def session_rename(session_ref: str, name: str) -> None:
     """Rename a session."""
     store = LedgerStore()
+    s = _resolve_session(store, session_ref, include_messages=False)
     try:
-        store.rename_session(session_id, name)
+        store.rename_session(s.id, name)
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
-    console.print(f"[green]Session {session_id} renamed to '{name}'[/green]")
+    console.print(f"[green]Session {s.id} renamed to '{name}'[/green]")
 
 
 @session_app.command("describe")
-def session_describe(session_id: str, description: str) -> None:
+def session_describe(session_ref: str, description: str) -> None:
     """Update a session's description."""
     store = LedgerStore()
-    store.update_session_description(session_id, description)
+    s = _resolve_session(store, session_ref, include_messages=False)
+    store.update_session_description(s.id, description)
     console.print("[green]Description updated[/green]")
 
 
 @session_app.command("archive")
-def session_archive(session_id: str) -> None:
+def session_archive(session_ref: str) -> None:
     """Archive a session (soft-delete, still queryable)."""
     store = LedgerStore()
-    store.archive_session(session_id)
-    console.print(f"[yellow]Session {session_id} archived[/yellow]")
+    s = _resolve_session(store, session_ref, include_messages=False)
+    store.archive_session(s.id)
+    console.print(f"[yellow]Session {s.id} archived[/yellow]")
 
 
 # --- Tool management ---
@@ -180,6 +222,16 @@ def _finalize_tool_import(spec, *, dry_run: bool) -> None:
 
     result = validate_spec(spec)
 
+    if result.issues:
+        print_validation_issues(result, console)
+
+    if not result.is_valid:
+        console.print(
+            f"[red]Not importing '{spec.name}' — "
+            "fix the errors above first[/red]"
+        )
+        raise typer.Exit(1)
+
     if dry_run:
         console.print(
             f"[cyan]Dry run — would import '{spec.name}' "
@@ -190,9 +242,6 @@ def _finalize_tool_import(spec, *, dry_run: bool) -> None:
         store = ToolStore()
         out = store.save(spec)
         console.print(f"[green]Imported '{spec.name}' → {out}[/green]")
-
-    if result.issues:
-        print_validation_issues(result, console)
 
 
 @tool_app.command("validate")
@@ -215,7 +264,7 @@ def tool_validate(
 
     print_validation_issues(result, console, show_field=True)
 
-    if not result.is_valid:
+    if not result.is_valid or (strict and not result.is_strict_valid):
         raise typer.Exit(1)
 
 
@@ -299,6 +348,12 @@ def tool_search(
     ),
 ) -> None:
     """Search Galaxy Tool Shed and/or nf-core modules for tools."""
+    if source not in ("toolshed", "nfcore", "all"):
+        console.print(
+            f"[red]Unknown --source '{source}'. "
+            "Valid values: toolshed, nfcore, all[/red]"
+        )
+        raise typer.Exit(1)
     if source in ("toolshed", "all"):
         console.print("\n[bold cyan]Galaxy Tool Shed results:[/bold cyan]")
         try:
@@ -358,15 +413,7 @@ def resume(session_ref: str) -> None:
     Accepts either a session ID or a unique session name.
     """
     store = LedgerStore()
-    # Try ID first, fall back to name lookup
-    try:
-        session = store.load_session(session_ref)
-    except KeyError:
-        try:
-            session = store.load_session_by_name(session_ref)
-        except KeyError:
-            console.print(f"[red]Session '{session_ref}' not found by ID or name[/red]")
-            raise typer.Exit(1)
+    session = _resolve_session(store, session_ref, include_messages=False)
     # Pass the resolved session ID to the chat handler
     asyncio.run(_analysis_chat(session.id))
 
@@ -909,12 +956,15 @@ def _resolve_inputs(
         filename_hint: str = source
         if "/" in source and not Path(source).exists():
             maybe_prefix, maybe_name = source.split("/", 1)
-            # Treat as hint only if the prefix matches a known entry id
-            for e in agent.session.entries:
-                if e.id.startswith(maybe_prefix):
-                    entry_prefix_hint = maybe_prefix
-                    filename_hint = maybe_name
-                    break
+            # Treat as hint only if the prefix is specific enough (>=4
+            # chars — a 1-3 char prefix collides constantly) and matches
+            # a known entry id
+            if len(maybe_prefix) >= 4:
+                for e in agent.session.entries:
+                    if e.id.startswith(maybe_prefix):
+                        entry_prefix_hint = maybe_prefix
+                        filename_hint = maybe_name
+                        break
 
         # 1. Literal path (expand ~ so ~/... paths work)
         p = Path(source).expanduser()
@@ -967,14 +1017,22 @@ def _resolve_inputs(
         if resolved is None:
             datasets_dir = agent.config.home_dir / "datasets"
             if datasets_dir.is_dir():
-                matches = sorted(datasets_dir.rglob(filename_hint))
+                # glob.escape so literal names containing [] * ? aren't
+                # interpreted as glob patterns by rglob.
+                matches = sorted(
+                    datasets_dir.rglob(glob.escape(filename_hint))
+                )
                 if matches:
                     resolved = matches[0]
 
         # --- Phase 2: fuzzy fallback (only if no exact match found anywhere) ---
 
-        # 6. Search prior session outputs by substring (most recent first).
-        if resolved is None:
+        # 6. Search prior session outputs by basename substring (most recent
+        #    first). Match against fp.name only — substring matches against
+        #    the full path hit on directory names and silently pick the
+        #    wrong file. Require >=4 chars so a 1-2 char hint can't match
+        #    every file in the session.
+        if resolved is None and filename_hint and len(filename_hint) >= 4:
             for entry in reversed(agent.session.entries):
                 if entry.kind not in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN):
                     continue
@@ -983,7 +1041,7 @@ def _resolve_inputs(
                 for f in entry.files:
                     if f.role == "output":
                         fp = Path(f.path)
-                        if filename_hint in str(fp):
+                        if filename_hint in fp.name:
                             resolved = fp
                             parent_id = entry.id
                             break
@@ -1013,7 +1071,18 @@ def _resolve_inputs(
                     for f in entry.files:
                         if f.role == "output":
                             fp = Path(f.path)
-                            if fp.suffix.lstrip(".").lower() == fmt.lower():
+                            # Strip a compression suffix first — the real
+                            # format of "foo.bam.gz" is bam, not gz.
+                            suffixes = [
+                                s for s in fp.suffixes
+                                if s.lstrip(".").lower()
+                                not in ("gz", "bz2", "xz")
+                            ]
+                            ext = (
+                                suffixes[-1].lstrip(".").lower()
+                                if suffixes else ""
+                            )
+                            if ext == fmt.lower():
                                 resolved = fp
                                 parent_id = entry.id
                                 break
@@ -1028,7 +1097,7 @@ def _resolve_inputs(
                 lp = Path(loc)
                 if not lp.is_absolute() and isa_dir:
                     lp = isa_dir / lp
-                name_match = filename_hint in str(lp)
+                name_match = filename_hint in lp.name
                 if name_match or f.format == filename_hint:
                     if lp.exists():
                         resolved = lp
@@ -1065,7 +1134,29 @@ def crystallize(
     from bioledger.ledger.models import EntryKind
 
     store = LedgerStore()
-    session = store.load_session(session_id)
+    session = _resolve_session(store, session_id, include_messages=False)
+
+    if stage:
+        # --stage produces a *runnable* directory — use the same
+        # build_rocrate path as `package` so the staged output includes
+        # workflow.nf, nextflow.config, engine-env.yml, staged data and
+        # companion files rather than a bare main.nf that can't run.
+        from bioledger.config import BioLedgerConfig
+        from bioledger.forges.analysisforge.executor import get_session_dir
+        from bioledger.forges.crateforge.builder import build_rocrate
+
+        config = BioLedgerConfig()
+        session_dir = get_session_dir(config.home_dir, session.id)
+        stage.mkdir(parents=True, exist_ok=True)
+        crate_dir = build_rocrate(
+            session, stage, entry_ids=entry_ids,
+            include_running=include_running,
+            session_dir=session_dir,
+        )
+        console.print(
+            f"[green]Runnable crystallized workflow written to {crate_dir}[/green]"
+        )
+        return
 
     if entry_ids:
         from bioledger.forges.analysisforge.crystallize import (
@@ -1081,56 +1172,22 @@ def crystallize(
 
         workflow_text = to_nextflow(session, include_running=include_running)
 
-    if stage:
-        import shutil
-
-        stage = Path(stage)
-        stage.mkdir(parents=True, exist_ok=True)
-        (stage / "main.nf").write_text(workflow_text)
-
-        # Stage companion files for entries in the workflow
-        tool_entries = [
-            e for e in session.entries
-            if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
-            and e.run_status in ("completed", "failed")
-            and (not entry_ids or e.id in set(entry_ids))
-            and e.companion_files
-        ]
-        for entry in tool_entries:
-            entry_dir = stage / entry.id
-            entry_dir.mkdir(parents=True, exist_ok=True)
-            for dest_rel, src_path in entry.companion_files.items():
-                src = Path(src_path)
-                if src.exists():
-                    dest = entry_dir / dest_rel
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dest)
-
-        if tool_entries:
-            console.print(
-                f"[green]Crystallized workflow written to {stage / 'main.nf'}[/green]\n"
-                f"[green]Staged companion files for {len(tool_entries)} entries[/green]"
-            )
-        else:
-            console.print(
-                f"[green]Crystallized workflow written to {stage / 'main.nf'}[/green]"
-            )
-    else:
-        # Text-only mode — warn if any entries have companion_files
-        tool_entries = [
-            e for e in session.entries
-            if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
-            and e.run_status in ("completed", "failed")
-            and (not entry_ids or e.id in set(entry_ids))
-            and e.companion_files
-        ]
-        if tool_entries:
-            console.print(
-                "[yellow]Warning: {} entries have companion files that are not "
-                "included in the text output. Use --stage <dir> to write them.[/yellow]"
-                .format(len(tool_entries))
-            )
-        console.print(workflow_text)
+    # Text-only mode (no --stage) — warn if entries have companion files
+    # that can't be represented in stdout output.
+    tool_entries = [
+        e for e in session.entries
+        if e.kind in (EntryKind.TOOL_RUN, EntryKind.SCRIPT_RUN)
+        and e.run_status in ("completed", "failed")
+        and (not entry_ids or e.id in set(entry_ids))
+        and e.companion_files
+    ]
+    if tool_entries:
+        console.print(
+            "[yellow]Warning: {} entries have companion files that are not "
+            "included in the text output. Use --stage <dir> to write them.[/yellow]"
+            .format(len(tool_entries))
+        )
+    console.print(workflow_text)
 
 
 # --- Package ---
@@ -1156,12 +1213,12 @@ def package(
 
     config = BioLedgerConfig()
     store = LedgerStore()
-    session = store.load_session(session_id)
+    session = _resolve_session(store, session_id, include_messages=False)
 
     if output_dir is None:
-        output_dir = config.home_dir / "crates" / session_id
+        output_dir = config.home_dir / "crates" / session.id
 
-    session_dir = get_session_dir(config.home_dir, session_id)
+    session_dir = get_session_dir(config.home_dir, session.id)
     crate_dir = build_rocrate(
         session, output_dir, entry_ids=entry_ids,
         include_running=include_running,

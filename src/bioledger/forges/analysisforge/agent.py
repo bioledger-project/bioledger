@@ -89,6 +89,43 @@ def _read_engine_metadata_sidecar(
         return None
 
 
+def _prepare_engine_inputs(
+    input_mapping: dict[str, str],
+) -> tuple[dict[str, Path], dict[str, str]]:
+    """Split an engine run's input_mapping into staged files + basenames.
+
+    Raw absolute paths and glob strings cannot be reproduced inside a
+    crystallized crate (``${projectDir}/<id8>/<raw>`` would be a dead
+    path). Engine entries therefore stage input files into the run dir
+    and reference them by basename — the same basename the crate uses.
+
+    Returns ``(files_to_stage, normalized)`` where files_to_stage maps a
+    synthetic slot (input name, or ``<name>__<i>`` for expanded glob
+    members) to a source Path, and normalized maps input name -> staged
+    basename for single files, or the glob's basename pattern (e.g.
+    ``"*.bam"``) for collections so crate channel wiring stays a glob.
+    """
+    import glob as _glob
+
+    files_to_stage: dict[str, Path] = {}
+    normalized: dict[str, str] = {}
+    for name, value in (input_mapping or {}).items():
+        value = str(value)
+        if any(ch in value for ch in "*?["):
+            expanded = sorted(_glob.glob(value))
+            if expanded:
+                normalized[name] = Path(value).name
+                for i, p in enumerate(expanded):
+                    files_to_stage[f"{name}__{i}"] = Path(p)
+                continue
+            normalized[name] = value  # unmatched glob — leave raw
+            continue
+        src = Path(value)
+        files_to_stage[name] = src
+        normalized[name] = src.name
+    return files_to_stage, normalized
+
+
 def _finalize_engine_entry(
     entry: LedgerEntry,
     run_handle: Any,
@@ -645,16 +682,17 @@ class AnalysisForgeAgent:
         self.dataset = dataset
 
         # Record DATA_IMPORT entry in ledger
+        from bioledger.forges.analysisforge.executor import _hash_file
+
         file_refs = []
         for f in dataset.files:
             if not f.is_remote:
                 p = Path(f.location)
                 if p.exists():
-                    sha = hashlib.sha256(p.read_bytes()).hexdigest()
                     file_refs.append(
                         FileRef(
                             path=str(p),
-                            sha256=sha,
+                            sha256=_hash_file(p),
                             size_bytes=p.stat().st_size,
                             role="input",
                         )
@@ -877,7 +915,10 @@ class AnalysisForgeAgent:
 
             executor = entry.executor or "docker"
             if executor in ("docker", "conda"):
-                # Existing Docker path — poll_tool finalizes in one step
+                # Existing Docker path — poll_tool finalizes in one step.
+                # Docker exceptions propagate to the caller deliberately:
+                # a daemon failure is an infrastructure problem, not a
+                # per-entry condition (see test_docker_exception_does_not_raise).
                 poll_tool(entry, session_dir)
             else:
                 # Engine adapter path — use adapter.poll()
@@ -1085,10 +1126,17 @@ class AnalysisForgeAgent:
         spec = self.get_tool_spec(tool_name)
         adapter = _get_engine_adapter(resolved_engine, engines_cfg)
 
+        # Normalize raw paths/globs to staged basenames — same rationale
+        # as submit_discovered: crate channel wiring needs crate-relative
+        # names, and input FileRefs give outputs their dependency edges.
+        files_to_stage, normalized_inputs = _prepare_engine_inputs(
+            input_mapping,
+        )
+
         # Generate the parameterized workflow
         handle = adapter.generate(
             spec=spec.execution,
-            input_mapping=input_mapping,
+            input_mapping=normalized_inputs,
         )
 
         # Create LedgerEntry for the fan-out run
@@ -1099,7 +1147,7 @@ class AnalysisForgeAgent:
             container=ContainerInfo(
                 image=handle.container_image or spec.execution.container,
                 command=[],
-                input_mapping=input_mapping,
+                input_mapping=normalized_inputs,
             ),
             params=params,
             parent_id=parent_id,
@@ -1110,12 +1158,16 @@ class AnalysisForgeAgent:
         )
         self.session.add(entry)
 
-        # Submit the workflow
+        # Submit the workflow — stage inputs under basenames first so the
+        # normalized values in config.yaml/params.json resolve in cwd.
         fanout_dir = session_dir / f"fanout_{entry.id}"
+        from bioledger.forges.analysisforge.executor import _stage_inputs
+
+        _stage_inputs(files_to_stage, session_dir, fanout_dir)
         try:
             run_handle = adapter.submit(
                 handle=handle,
-                input_mapping=input_mapping,
+                input_mapping=normalized_inputs,
                 params=params,
                 work_dir=fanout_dir,
             )
@@ -1172,6 +1224,24 @@ class AnalysisForgeAgent:
             snapshot["command"] = engine_cmd
             entry.tool_spec_snapshot = snapshot
 
+        # Record input FileRefs for dependency wiring
+        from bioledger.forges.analysisforge.executor import _hash_file
+
+        for src in files_to_stage.values():
+            try:
+                resolved = src.resolve()
+                if resolved.is_file():
+                    entry.files.append(
+                        FileRef(
+                            path=str(resolved),
+                            sha256=_hash_file(resolved),
+                            size_bytes=resolved.stat().st_size,
+                            role="input",
+                        )
+                    )
+            except OSError:
+                pass
+
         # Write engine metadata sidecar for poll/collect reconstruction
         _write_engine_metadata_sidecar(
             session_dir, entry.id, run_handle,
@@ -1213,6 +1283,14 @@ class AnalysisForgeAgent:
         companion_files: dict[str, str] = {}
         discovered_revision = ""
         engines_cfg = self.config.engines if self.config else None
+
+        # Normalize raw input paths/globs to staged basenames — raw paths
+        # can't be reproduced inside a crystallized crate. Files are
+        # staged into run_<id>/ below, and each staged source becomes an
+        # input FileRef so dependency edges work for engine-run inputs.
+        files_to_stage, normalized_inputs = _prepare_engine_inputs(
+            input_mapping,
+        )
 
         # Parse the source string — supports @<revision> pinning syntax
         # e.g. "nfcore:align/bowtie2@abc123" or "toolshed:devteam/bowtie2@abc123"
@@ -1468,7 +1546,7 @@ class AnalysisForgeAgent:
             container=ContainerInfo(
                 image=spec.container,
                 command=[],
-                input_mapping=input_mapping,
+                input_mapping=normalized_inputs,
             ),
             params=params,
             parent_id=parent_id,
@@ -1526,16 +1604,49 @@ class AnalysisForgeAgent:
         # Stage companion files (module tree, tool XML, generated Snakefile)
         # into run_<id>/<entry.id>/ so ${projectDir}/<entry.id>/... resolves.
         from bioledger.forges.analysisforge.executor import (
+            _stage_inputs,
             stage_companion_files,
         )
 
         run_dir = work_dir / f"run_{entry.id}"
         stage_companion_files(companion_files, run_dir, entry.id)
 
+        # Stage input files at run_dir root under their basenames so the
+        # normalized {{ inputs.X }} values resolve relative to cwd.
+        staged_names = (
+            _stage_inputs(files_to_stage, session_dir, run_dir)
+            if files_to_stage else {}
+        )
+        for name in normalized_inputs:
+            if name in staged_names:
+                # Collision-aware staging may have renamed the file
+                normalized_inputs[name] = staged_names[name]
+        if entry.container:
+            entry.container.input_mapping = dict(normalized_inputs)
+
+        # Record input FileRefs — without these, dependency edges for
+        # engine-produced outputs silently drop.
+        from bioledger.forges.analysisforge.executor import _hash_file
+
+        for src in files_to_stage.values():
+            try:
+                resolved = src.resolve()
+                if resolved.is_file():
+                    entry.files.append(
+                        FileRef(
+                            path=str(resolved),
+                            sha256=_hash_file(resolved),
+                            size_bytes=resolved.stat().st_size,
+                            role="input",
+                        )
+                    )
+            except OSError:
+                pass
+
         try:
             run_handle = adapter.submit_spec(
                 spec=spec,
-                input_mapping=input_mapping,
+                input_mapping=normalized_inputs,
                 params=params,
                 work_dir=run_dir,
             )

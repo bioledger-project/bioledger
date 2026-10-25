@@ -378,7 +378,16 @@ def _build_input_file_refs(input_mapping: dict[str, str], run_dir: Path) -> list
     file_refs = []
     for staged_basename in input_mapping.values():
         staged_path = run_dir / staged_basename
-        if staged_path.exists():
+        if staged_path.is_dir():
+            # Directory inputs can't be hashed file-wise — record the
+            # reference without a content hash.
+            file_refs.append(
+                FileRef(
+                    path=str(staged_path), sha256="",
+                    size_bytes=0, role="input",
+                )
+            )
+        elif staged_path.exists():
             file_refs.append(
                 FileRef(
                     path=str(staged_path), sha256=_hash_file(staged_path),
@@ -700,7 +709,22 @@ def run_tool(
             # Docker runners have a 'client' attribute; CondaRunners don't.
             # Use getattr instead of isinstance so mocked runners work.
             docker_client = getattr(runner, "client", None)
+            # Capture logs BEFORE removing the container — a timeout is
+            # exactly when logs are needed to diagnose the hang.
+            stdout_text = stderr_text = ""
             if docker_client is not None:
+                try:
+                    container = runner.client.containers.get(entry.run_handle_id)
+                    _out = container.logs(
+                        stdout=True, stderr=False,
+                    ).decode(errors="replace")
+                    _err = container.logs(
+                        stdout=False, stderr=True,
+                    ).decode(errors="replace")
+                    stdout_text = _out if isinstance(_out, str) else ""
+                    stderr_text = _err if isinstance(_err, str) else ""
+                except Exception:
+                    pass
                 try:
                     container = runner.client.containers.get(entry.run_handle_id)
                     container.kill()
@@ -726,10 +750,41 @@ def run_tool(
                         os.killpg(os.getpgid(pid), signal.SIGKILL)
                 except (ValueError, ProcessLookupError, PermissionError):
                     pass
+                # Local-process logs live in run_dir files
+                for name in _LOG_NAMES + ("engine.log",):
+                    lp = run_dir / name
+                    if lp.exists():
+                        try:
+                            text = lp.read_text(errors="replace")
+                            if name == "stdout.log":
+                                stdout_text = stdout_text or text
+                            else:
+                                stderr_text = stderr_text or text
+                        except OSError:
+                            pass
             entry.run_status = "failed"
             entry.exit_code = -1
+            # Persist captured logs as entry FileRefs so they survive in
+            # the ledger even though _finalize_entry never runs.
+            for name, text in (
+                ("stdout.log", stdout_text),
+                ("stderr.log", stderr_text),
+            ):
+                if text:
+                    lp = run_dir / name
+                    lp.write_text(text, encoding="utf-8")
+                    entry.files.append(
+                        FileRef(
+                            path=str(lp),
+                            sha256=_hash_file(lp),
+                            size_bytes=lp.stat().st_size,
+                            role="log",
+                        )
+                    )
+            tail = stderr_text.strip().splitlines()[-3:]
             raise TimeoutError(
                 f"Process {entry.run_handle_id} exceeded timeout of {timeout}s"
+                + (f" — stderr tail: {' | '.join(tail)[:300]}" if tail else "")
             )
         time.sleep(poll_interval)
         result = _poll_runner(runner, entry.run_handle_id, run_dir)

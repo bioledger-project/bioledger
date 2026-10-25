@@ -190,6 +190,164 @@ class TestRunToolTimeout:
         assert entry.run_status == "failed"
         assert entry.exit_code == -1
 
+    def test_timeout_persists_docker_logs_as_filerefs(self, tmp_path: Path):
+        """Timeout must capture container logs before kill/remove."""
+        session = LedgerSession(name="timeout-logs")
+        session_dir = tmp_path / "sessions" / session.id
+
+        spec = ToolSpec(
+            execution=ExecutionSpec(
+                name="slow-tool",
+                container="alpine:latest",
+                command="sleep 999",
+                inputs={},
+                outputs={"out": ToolOutput(pattern="output.txt")},
+                parameters={},
+                status=SpecStatus.VALID,
+            ),
+        )
+
+        container = MagicMock()
+
+        def _logs(stdout=True, stderr=False):
+            return b"partial stdout\n" if stdout else b"partial stderr\n"
+
+        container.logs.side_effect = _logs
+        mock_runner = MagicMock()
+        mock_runner.submit.return_value = "fake-container-id"
+        mock_runner.poll.return_value = None
+        mock_runner.client.containers.get.return_value = container
+
+        with patch(
+            "bioledger.forges.analysisforge.executor.DockerRunner",
+            return_value=mock_runner,
+        ):
+            with pytest.raises(TimeoutError):
+                run_tool(
+                    session=session,
+                    spec=spec,
+                    input_files={},
+                    session_dir=session_dir,
+                    timeout=0,
+                    poll_interval=0.01,
+                )
+
+        entry = session.entries[-1]
+        assert entry.run_status == "failed"
+
+        run_dir = session_dir / "runs" / entry.id
+        assert (run_dir / "stdout.log").read_text() == "partial stdout\n"
+        assert (run_dir / "stderr.log").read_text() == "partial stderr\n"
+
+        log_refs = {Path(f.path).name for f in entry.files if f.role == "log"}
+        assert log_refs == {"stdout.log", "stderr.log"}
+        # Logs captured before the container is killed/removed
+        container.logs.assert_called()
+        container.kill.assert_called()
+        container.remove.assert_called()
+
+    def test_timeout_persists_local_process_logs(self, tmp_path: Path):
+        """Conda/local timeout: existing stdout.log in run_dir is kept."""
+        from bioledger.core.conda_runner import CondaRunner
+
+        session = LedgerSession(name="timeout-local")
+        session_dir = tmp_path / "sessions" / session.id
+
+        spec = ToolSpec(
+            execution=ExecutionSpec(
+                name="slow-conda-tool",
+                executors=["conda"],
+                conda={"dependencies": ["python=3.11"]},
+                command="sleep 999",
+                inputs={},
+                outputs={"out": ToolOutput(pattern="output.txt")},
+                parameters={},
+                status=SpecStatus.VALID,
+            ),
+        )
+
+        def _fake_submit(conda_env, command, workdir):
+            # Simulate the runner having already written partial logs
+            Path(workdir).mkdir(parents=True, exist_ok=True)
+            (Path(workdir) / "stdout.log").write_text(
+                "local partial stdout\n"
+            )
+            (Path(workdir) / "stderr.log").write_text(
+                "local partial stderr\n"
+            )
+            return "99999"
+
+        with patch.object(CondaRunner, "ensure_env", return_value="env_x"), \
+             patch.object(CondaRunner, "submit", side_effect=_fake_submit), \
+             patch.object(CondaRunner, "poll", return_value=None), \
+             patch(
+                 "bioledger.forges.analysisforge.executor.os.killpg"
+             ), patch(
+                 "bioledger.forges.analysisforge.executor.os.getpgid"
+             ):
+            with pytest.raises(TimeoutError):
+                run_tool(
+                    session=session,
+                    spec=spec,
+                    input_files={},
+                    session_dir=session_dir,
+                    params={},
+                    timeout=0,
+                    poll_interval=0.01,
+                )
+
+        entry = session.entries[-1]
+        assert entry.run_status == "failed"
+
+        log_refs = {Path(f.path).name for f in entry.files if f.role == "log"}
+        assert "stdout.log" in log_refs
+        assert "stderr.log" in log_refs
+
+        run_dir = session_dir / "runs" / entry.id
+        assert "local partial stdout" in (run_dir / "stdout.log").read_text()
+
+    def test_timeout_message_includes_stderr_tail(self, tmp_path: Path):
+        """TimeoutError should surface the last stderr lines for diagnosis."""
+        session = LedgerSession(name="timeout-tail")
+        session_dir = tmp_path / "sessions" / session.id
+
+        spec = ToolSpec(
+            execution=ExecutionSpec(
+                name="slow-tool",
+                container="alpine:latest",
+                command="sleep 999",
+                inputs={},
+                outputs={"out": ToolOutput(pattern="output.txt")},
+                parameters={},
+                status=SpecStatus.VALID,
+            ),
+        )
+
+        container = MagicMock()
+        container.logs.side_effect = (
+            lambda stdout=True, stderr=False: (
+                b"" if stdout else b"line1\nline2\nFATAL: out of memory\n"
+            )
+        )
+        mock_runner = MagicMock()
+        mock_runner.submit.return_value = "fake-container-id"
+        mock_runner.poll.return_value = None
+        mock_runner.client.containers.get.return_value = container
+
+        with patch(
+            "bioledger.forges.analysisforge.executor.DockerRunner",
+            return_value=mock_runner,
+        ):
+            with pytest.raises(TimeoutError, match="FATAL: out of memory"):
+                run_tool(
+                    session=session,
+                    spec=spec,
+                    input_files={},
+                    session_dir=session_dir,
+                    timeout=0,
+                    poll_interval=0.01,
+                )
+
 
 class TestCrystallizeFiltering:
     """T4/S5: crystallize should only include completed/failed entries."""
