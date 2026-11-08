@@ -276,3 +276,166 @@ class TestProfileBasedConfig:
         crate_dir = build_rocrate(session, tmp_path)
         config = (crate_dir / "nextflow.config").read_text()
         assert "engine-env.yml" in config
+
+
+class TestGenerateNextflowConfig:
+    def _cfg(self, entries):
+        from bioledger.forges.crateforge.builder import (
+            _generate_nextflow_config,
+        )
+
+        return _generate_nextflow_config(entries)
+
+    def test_mixed_docker_conda_gets_standard_profile(self):
+        cfg = self._cfg(
+            [_make_entry(executor="docker"), _make_entry(executor="conda")]
+        )
+        assert "standard {" in cfg
+        assert "docker.enabled = true" in cfg
+        assert "conda.enabled = true" in cfg
+        assert "// docker-only profile:" in cfg
+        assert "// conda-only profile:" in cfg
+        assert "-profile standard" in cfg
+
+    def test_neither_runtime_uncomments_singularity(self):
+        cfg = self._cfg([_make_entry(executor="snakemake")])
+        assert "    singularity {" in cfg
+        assert "// Engine runtimes: conda env create" in cfg
+
+    def test_nextflow_manifest_version_pinned(self):
+        e = _make_entry(executor="nextflow")
+        e.executor_version = "24.10.0"
+        cfg = self._cfg([e])
+        assert "manifest {" in cfg
+        assert "nextflowVersion = '>=24.10" in cfg
+
+    def test_non_semver_version_not_pinned(self):
+        e = _make_entry(executor="nextflow")
+        e.executor_version = "unknown-build"
+        cfg = self._cfg([e])
+        assert "manifest {" not in cfg
+
+
+class TestGenerateSnakefileFromEntry:
+    def test_no_snapshot_returns_none(self):
+        from bioledger.forges.crateforge.builder import (
+            _generate_snakefile_from_entry,
+        )
+
+        assert _generate_snakefile_from_entry(
+            _make_entry(spec_snapshot=None)
+        ) is None
+
+    def test_bad_snapshot_returns_none(self):
+        from bioledger.forges.crateforge.builder import (
+            _generate_snakefile_from_entry,
+        )
+
+        assert _generate_snakefile_from_entry(
+            _make_entry(spec_snapshot={"bogus": True})
+        ) is None
+
+    def test_generate_failure_returns_none(self, monkeypatch):
+        from bioledger.forges.crateforge import builder
+        from bioledger.forges.crateforge.builder import (
+            _generate_snakefile_from_entry,
+        )
+        from bioledger.toolspec.models import ExecutionSpec
+
+        monkeypatch.setattr(
+            "bioledger.core.engines.snakemake_adapter._generate_snakefile",
+            lambda *a: (_ for _ in ()).throw(RuntimeError("gen boom")),
+        )
+        entry = _make_entry(
+            executor="snakemake",
+            spec_snapshot=ExecutionSpec(name="t", command="c").model_dump(),
+        )
+        assert _generate_snakefile_from_entry(entry) is None
+
+
+class TestEngineSupplementaryFiles:
+    def _crate(self, monkeypatch):
+        from bioledger.forges.crateforge import builder
+
+        added = []
+        crate = SimpleNamespace(
+            add_file=lambda *a, **k: added.append((a, k))
+        )
+        return crate, added
+
+    def test_companion_files_staged(self, tmp_path):
+        from rocrate.rocrate import ROCrate
+
+        from bioledger.forges.crateforge.builder import (
+            _add_engine_supplementary_files,
+        )
+
+        src = tmp_path / "Snakefile"
+        src.write_text("rule all:")
+        e = _make_entry(executor="snakemake")
+        e.companion_files = {"Snakefile": str(src), "gone": "/nope/x"}
+        crate = ROCrate()
+        _add_engine_supplementary_files(
+            crate, tmp_path / "scratch", [e], None
+        )
+        scratch = tmp_path / "scratch"
+        assert (scratch / e.id / "Snakefile").exists()
+        # missing companion warns + skips, doesn't raise
+        assert not (scratch / e.id / "gone").exists()
+
+    def test_running_entry_skipped_unless_included(self, tmp_path):
+        from rocrate.rocrate import ROCrate
+
+        from bioledger.forges.crateforge.builder import (
+            _add_engine_supplementary_files,
+        )
+
+        src = tmp_path / "S"
+        src.write_text("x")
+        e = _make_entry(executor="snakemake")
+        e.companion_files = {"S": str(src)}
+        e.run_status = "running"
+        crate = ROCrate()
+        scratch = tmp_path / "scratch"
+        _add_engine_supplementary_files(crate, scratch, [e], None)
+        assert not (scratch / e.id / "S").exists()
+        _add_engine_supplementary_files(
+            crate, scratch, [e], None, include_running=True
+        )
+        assert (scratch / e.id / "S").exists()
+
+
+class TestBuildRocrateGaps:
+    def test_entry_ids_filter(self, tmp_path):
+        s = LedgerSession(name="s")
+        e1, e2 = _make_entry(), _make_entry(tool_name="bwa")
+        s.add(e1)
+        s.add(e2)
+        out = build_rocrate(s, tmp_path / "out", entry_ids=[e1.id])
+        ledger = json.loads(
+            (out / "ledger.json").read_text()
+        )
+        assert len(ledger["entries"]) == 1
+        assert ledger["entries"][0]["id"] == e1.id
+
+    def test_data_files_added_with_dedup(self, tmp_path):
+        real = tmp_path / "out.bam"
+        real.write_text("data")
+        e = _make_entry()
+        e.files.append(FileRef(
+            path=str(real), sha256="h", size_bytes=4, role="output"
+        ))
+        s = LedgerSession(name="s")
+        s.add(e)
+        out = build_rocrate(s, tmp_path / "out")
+        names = [p.name for p in out.rglob("*")]
+        assert "out.bam" in names
+        # file lands under <entry8>/ prefix
+        assert (out / e.id[:8] / "out.bam").exists()
+
+    def test_missing_data_file_skipped(self, tmp_path):
+        e = _make_entry(output_files=["ghost.bam"])
+        s = LedgerSession(name="s")
+        s.add(e)
+        out = build_rocrate(s, tmp_path / "out")
+        assert not list(out.rglob("ghost.bam"))

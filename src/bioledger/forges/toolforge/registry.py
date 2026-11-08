@@ -23,14 +23,14 @@ def _cache_path(key: str) -> Path:
     return _CACHE_DIR / f"{key}.json"
 
 
-def _read_cache(key: str) -> list[dict] | None:
+def _read_cache(key: str, *, stale_ok: bool = False) -> list[dict] | None:
     path = _cache_path(key)
     if path.exists():
         try:
             data = json.loads(path.read_text())
         except (json.JSONDecodeError, OSError):
             return None  # corrupt cache — treat as a miss
-        if time.time() - data.get("ts", 0) < _CACHE_TTL:
+        if stale_ok or time.time() - data.get("ts", 0) < _CACHE_TTL:
             return data["results"]
     return None
 
@@ -45,6 +45,7 @@ def _write_cache(key: str, results: list[dict]) -> None:
     retry=retry_if_exception_type(
         (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)
     ),
+    reraise=True,
 )
 async def search_biocontainers(tool_name: str) -> list[dict[str, Any]]:
     """Search BioContainers registry with retry + cache."""
@@ -72,7 +73,7 @@ async def get_container_image(tool_name: str, version: str | None = None) -> str
         results = await search_biocontainers(tool_name)
     except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException):
         # All retries exhausted — fall back to stale cache
-        cached = _read_cache(tool_name)
+        cached = _read_cache(tool_name, stale_ok=True)
         if cached:
             results = cached  # stale but better than nothing
         else:

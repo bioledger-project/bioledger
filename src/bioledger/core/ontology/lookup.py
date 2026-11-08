@@ -52,6 +52,7 @@ def _write_cache(key: str, results: list[dict]) -> None:
     retry=retry_if_exception_type(
         (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)
     ),
+    reraise=True,
 )
 async def search_ontology(
     query: str,

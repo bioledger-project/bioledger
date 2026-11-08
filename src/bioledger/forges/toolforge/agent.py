@@ -83,7 +83,7 @@ class ToolForgeAgent:
         Re-validates the LLM's output — a "fix" that leaves the spec
         invalid raises rather than silently returning a bad spec.
         """
-        from bioledger.toolspec.validate import Severity, validate_spec
+        from bioledger.toolspec.validate import Severity, validate_execution
 
         issues_str = "\n".join(f"- {i.field}: {i.message}" for i in issues)
         draft = ExecutionSpecDraft.from_execution_spec(spec)
@@ -91,7 +91,7 @@ class ToolForgeAgent:
         result = await self._fix_agent.run(prompt, deps=deps)
         fixed = result.output.to_execution_spec()
 
-        remaining = validate_spec(fixed)
+        remaining = validate_execution(fixed)
         if not remaining.is_valid:
             still_bad = "\n".join(
                 f"- {i.field}: {i.message}" for i in remaining.issues
