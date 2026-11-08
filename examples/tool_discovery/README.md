@@ -1,6 +1,6 @@
 # Example: Tool Discovery
 
-BioLedger can discover tools from external repositories — the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/) and [nf-core modules](https://nf-co.re/modules) — and run them with their native workflow engines. No translation to BioLedger specs is required.
+BioLedger can discover tools from external repositories — the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/), [nf-core modules](https://nf-co.re/modules), and [Snakemake wrappers](https://github.com/snakemake/snakemake-wrappers) — and run them with their native workflow engines. No translation to BioLedger specs is required.
 
 ## Files in this directory
 
@@ -34,7 +34,7 @@ Results show tool name, description, and repository information.
 
 ## Run discovered tools in a session
 
-Inside an interactive session, the agent can search external repositories and run discovered tools directly:
+Inside an interactive session, the agent can search all three repositories (`search_toolshed`, `search_nfcore`, `search_snakemake_wrappers` — the last has no CLI `--source` equivalent yet) and run discovered tools directly:
 
 ```bash
 bioledger session new tool-discovery-test
@@ -58,8 +58,10 @@ assistant> Submitted discovered tool fastqc as job abc123.
 ```
 
 **How it works:**
-- **Galaxy Tool Shed tools** → downloaded XML is served by planemo (local Galaxy) via `--tool_dir`. A minimal spec is extracted just to generate the `.ga` workflow wrapper.
-- **nf-core modules** → downloaded `main.nf` is run directly by Nextflow. No translation to BioLedger spec.
+- **Galaxy Tool Shed tools** → downloaded tool XML is run by `planemo run` with a generated `job.yml` for inputs/params.
+- **nf-core modules** → installed via `nf-core modules install`, then wrapped in a generated `main.nf` + `nextflow.config` and run by Nextflow.
+- **Snakemake wrappers** → downloaded wrapper plus a generated Snakefile using the native `wrapper:` directive, run by Snakemake.
+- **Revision pinning** → append `@<revision>` to the discovered-source string (`toolshed:<owner>/<repo>@<rev>`, `nfcore:<subdir>@<sha>`, `snakemake:<path>@<tag>`). The resolved revision is recorded on the ledger entry for reproducibility.
 
 ---
 

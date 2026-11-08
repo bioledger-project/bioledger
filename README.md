@@ -78,7 +78,7 @@ ISA-Tab to reproducible package without writing workflow syntax. See the [full w
 
 ### More examples
 
-- **[Tool discovery](examples/tool_discovery/)** — search the Galaxy Tool Shed and nf-core modules, run discovered tools via their native engines, import BioLedger YAML specs
+- **[Tool discovery](examples/tool_discovery/)** — search the Galaxy Tool Shed, nf-core modules, and Snakemake wrappers; run discovered tools via their native engines; import BioLedger YAML specs
 - **[Building tool specs](examples/tool_building/)** — author BioLedger tool specs manually for Docker, Conda, Nextflow, and Galaxy executors
 - **[CSV to ISA-Tab](examples/csv_to_isatab/)** — start from a plain samplesheet and convert to structured metadata
 - **[Variant calling on *L. donovani*](examples/variant_calling/)** — use the public library repos to discover tools and data, then run a full pipeline end-to-end
@@ -208,7 +208,7 @@ bioledger tool show fastqc
 
 #### Tool Discovery
 
-BioLedger can search external tool repositories — the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/) and [nf-core modules](https://nf-co.re/modules) — for tools that aren't installed locally. Use `bioledger tool search` to find tools by keyword, then run them directly in an interactive session via the agent's `search_toolshed` and `search_nfcore` tools.
+BioLedger can search external tool repositories — the [Galaxy Tool Shed](https://toolshed.g2.bx.psu.edu/), [nf-core modules](https://nf-co.re/modules), and [Snakemake wrappers](https://github.com/snakemake/snakemake-wrappers) — for tools that aren't installed locally. Use `bioledger tool search` (sources: `toolshed`, `nfcore`, `all`) to find tools by keyword. In an interactive session, the agent's `search_toolshed`, `search_nfcore`, and `search_snakemake_wrappers` tools cover all three repositories — including Snakemake wrappers, which are not exposed through the CLI flag.
 
 ```
 you> search the tool shed for fastqc
@@ -221,14 +221,16 @@ assistant> Submitted discovered tool fastqc as job abc123.
            Source: toolshed:iuc/fastqc. Type 'status' to check progress.
 ```
 
-Discovered tools are downloaded and run via their **native workflow engine** — the original tool XML or Nextflow module is used directly, not translated to a BioLedger spec. Galaxy Tool Shed tools run via planemo (local Galaxy); nf-core modules run via Nextflow.
+Discovered tools are downloaded and run via their **native workflow engine** — the original tool XML, Nextflow module, or Snakemake wrapper is used directly, not translated to a BioLedger spec. Galaxy Tool Shed tools run via planemo (local Galaxy); nf-core modules run via Nextflow; Snakemake wrappers run via Snakemake.
+
+Pin a specific upstream revision with `@<revision>` on the discovered-source string — e.g. `nfcore:bowtie2/align@abc123` or `snakemake:bio/fastqc@v7.2.0`. The resolved revision is recorded on the ledger entry (`discovered_source` / `discovered_revision`) so packaged workflows reproduce the same upstream code.
 
 Tool specs are stored as YAML in `~/.bioledger/tools/` and use a two-layer model:
 
 - **ExecutionSpec** — container, command template, inputs, outputs, parameters
 - **InterfaceSpec** (optional) — UI hints, conditionals, repeat blocks
 
-**Authoring a new tool?** See the full spec reference: [`src/bioledger/toolspec/README.md`](src/bioledger/toolspec/README.md). It documents every field, the command template variables, the container mount layout, validation rules, and the migration story.
+**Authoring a new tool?** See the spec reference: [`src/bioledger/toolspec/README.md`](src/bioledger/toolspec/README.md) — the canonical format guide lives in [`bioledger-toolspec-schema/docs/GUIDE.md`](https://github.com/bioledger-project/toolspec-schema/blob/main/docs/GUIDE.md), and the Pydantic models in that package are the source of truth.
 
 ---
 
@@ -385,7 +387,7 @@ Setting `BIOLEDGER_DEFAULT_MODEL` switches the provider for all primary tasks. U
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -v          # 468 tests
+pytest tests/ -v          # 897 tests
 ruff check src/ tests/
 mypy src/bioledger
 ```

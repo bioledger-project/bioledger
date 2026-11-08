@@ -30,8 +30,12 @@ If you just want to see a working example, look at
 - Extension: `.bioledger.yaml` (recommended; not enforced).
 - Storage: `~/.bioledger/tools/<name>.bioledger.yaml` after `bioledger tool import`.
 - Encoding: UTF-8, standard YAML 1.2.
-- The source of truth for the schema is
-  [`src/bioledger/toolspec/models.py`](models.py). Anything here that disagrees with the Pydantic models is a doc bug — the models win.
+- The source of truth for the schema is the
+  [`bioledger-toolspec-schema`](https://github.com/bioledger-project/toolspec-schema)
+  package (`bioledger_toolspec_schema.models`). The modules in this
+  directory are thin re-export shims kept for backwards compatibility.
+  Anything here that disagrees with the Pydantic models is a doc bug — the
+  models win.
 
 ---
 

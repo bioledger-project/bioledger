@@ -221,9 +221,15 @@ as config values, pass them via Jinja:
 ### Snakemake discovery asymmetry
 
 Snakemake does not have a first-class tool discovery registry analogous to
-the Galaxy Tool Shed or nf-core modules. To use a snakemake wrapper or a
-local Snakefile, author a toolspec by hand as shown above. (A future release
-may add discovery for [snakemake-wrappers](https://github.com/snakemake/snakemake-wrappers).)
+the Galaxy Tool Shed or nf-core modules, but the
+[snakemake-wrappers](https://github.com/snakemake/snakemake-wrappers)
+repository can be searched and run through the interactive agent: the
+`search_snakemake_wrappers` tool finds wrappers, and
+`discovered_source='snakemake:<wrapper_path>[@<revision>]'` submits them
+(the generated Snakefile uses the native `wrapper:` directive). The CLI
+`tool search --source` flag does not yet accept `snakemake` — wrapper
+discovery is agent-only for now. To use a local Snakefile, author a
+toolspec by hand as shown above.
 
 ---
 
