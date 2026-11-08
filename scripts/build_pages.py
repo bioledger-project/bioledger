@@ -22,8 +22,8 @@ from pathlib import Path
 import markdown
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GITHUB_BLOB_BASE = "https://github.com/d-callan/bioledger/blob/main"
-GITHUB_TREE_BASE = "https://github.com/d-callan/bioledger/tree/main"
+GITHUB_BLOB_BASE = "https://github.com/bioledger-project/bioledger/blob/master"
+GITHUB_TREE_BASE = "https://github.com/bioledger-project/bioledger/tree/master"
 
 MD_EXTENSIONS = ["tables", "fenced_code", "toc"]
 
@@ -34,7 +34,7 @@ NAV = """
   <a href="index.html">Examples</a>
   <a href="https://bioledger-project.github.io/toolspec-library/">Tool Library</a>
   <a href="https://bioledger-project.github.io/isatab-library/">Study Library</a>
-  <a href="https://github.com/d-callan/bioledger">GitHub</a>
+  <a href="https://github.com/bioledger-project/bioledger">GitHub</a>
 </nav>
 """.strip()
 
